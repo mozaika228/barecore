@@ -3,14 +3,23 @@ CC := $(CROSS)gcc
 LD := $(CROSS)ld
 OBJCOPY := $(CROSS)objcopy
 NASM := nasm
+EFI_CC ?= gcc
+EFI_OBJCOPY ?= objcopy
 
 BUILD_DIR := build
 STAGE2_SECTORS := 8
 KERNEL_SECTORS := 64
 
 CFLAGS := -ffreestanding -fno-pic -fno-stack-protector -m64 -mcmodel=kernel -mno-red-zone -O2 -Wall -Wextra
+EFI_CFLAGS ?= -fpic -fshort-wchar -mno-red-zone -Wall -Wextra -I/usr/include/efi -I/usr/include/efi/x86_64
+EFI_LDS ?= /usr/lib/elf_x86_64_efi.lds
+EFI_CRT ?= /usr/lib/crt0-efi-x86_64.o
+EFI_LIBDIR ?= /usr/lib
+EFI_LDFLAGS ?= -nostdlib -znocombreloc -T $(EFI_LDS) -shared -Bsymbolic
+EFI_LIBS ?= -L$(EFI_LIBDIR) -lefi -lgnuefi
+OVMF ?= OVMF.fd
 
-.PHONY: all clean run
+.PHONY: all clean run uefi run-uefi
 
 all: $(BUILD_DIR)/os.img
 
@@ -35,6 +44,28 @@ $(BUILD_DIR)/kernel.elf: $(BUILD_DIR)/kernel_entry.o $(BUILD_DIR)/kernel.o linke
 $(BUILD_DIR)/kernel.bin: $(BUILD_DIR)/kernel.elf
 	$(OBJCOPY) -O binary $< $@
 
+$(BUILD_DIR)/bootx64.o: uefi/bootx64.c | $(BUILD_DIR)
+	$(EFI_CC) $(EFI_CFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/bootx64.so: $(BUILD_DIR)/bootx64.o
+	$(EFI_CC) $(EFI_LDFLAGS) $(EFI_CRT) $< -o $@ $(EFI_LIBS)
+
+$(BUILD_DIR)/BOOTX64.EFI: $(BUILD_DIR)/bootx64.so
+	$(EFI_OBJCOPY) \
+		-j .text -j .sdata -j .data -j .dynamic -j .dynsym \
+		-j .rel -j .rela -j .reloc \
+		--target=efi-app-x86_64 $< $@
+
+$(BUILD_DIR)/esp/EFI/BOOT/BOOTX64.EFI: $(BUILD_DIR)/BOOTX64.EFI
+	mkdir -p $(BUILD_DIR)/esp/EFI/BOOT
+	cp $< $@
+
+$(BUILD_DIR)/esp/kernel.bin: $(BUILD_DIR)/kernel.bin
+	mkdir -p $(BUILD_DIR)/esp
+	cp $< $@
+
+uefi: $(BUILD_DIR)/esp/EFI/BOOT/BOOTX64.EFI $(BUILD_DIR)/esp/kernel.bin
+
 $(BUILD_DIR)/os.img: $(BUILD_DIR)/boot.bin $(BUILD_DIR)/stage2.bin $(BUILD_DIR)/kernel.bin
 	dd if=/dev/zero of=$@ bs=512 count=2880
 	dd if=$(BUILD_DIR)/boot.bin of=$@ conv=notrunc
@@ -43,6 +74,9 @@ $(BUILD_DIR)/os.img: $(BUILD_DIR)/boot.bin $(BUILD_DIR)/stage2.bin $(BUILD_DIR)/
 
 run: $(BUILD_DIR)/os.img
 	qemu-system-x86_64 -drive format=raw,file=$(BUILD_DIR)/os.img -serial stdio
+
+run-uefi: uefi
+	qemu-system-x86_64 -bios $(OVMF) -drive format=raw,file=fat:rw:$(BUILD_DIR)/esp -serial stdio
 
 clean:
 	rm -rf $(BUILD_DIR)
