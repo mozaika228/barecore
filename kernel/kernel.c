@@ -120,6 +120,10 @@ static inline void cpu_sti(void) {
     __asm__ volatile("sti");
 }
 
+static inline void dbg_mark(char c) {
+    __asm__ volatile("outb %0, %1" : : "a"((uint8_t)c), "Nd"(COM1_PORT));
+}
+
 static inline uint32_t rgb_to_pixel(uint32_t rgb, uint32_t format) {
     uint32_t r = (rgb >> 16) & 0xFF;
     uint32_t g = (rgb >> 8) & 0xFF;
@@ -491,29 +495,32 @@ static void task_b(void) {
 }
 
 void kmain(const barecore_boot_info_t *boot_info) {
-    __asm__ volatile(
-        "movw $0x3F8, %%dx\n\t"
-        "movb $'M', %%al\n\t"
-        "outb %%al, %%dx\n\t"
-        :
-        :
-        : "ax", "dx");
+    dbg_mark('M');
 
     /* Keep firmware/BIOS serial state untouched for CI-friendly capture. */
     init_console(boot_info);
+    dbg_mark('1');
 
     write_cstr("Kernel: long mode OK\n");
+    dbg_mark('2');
     write_cstr("IDT/PIC/PIT init\n");
+    dbg_mark('3');
 
     init_idt();
+    dbg_mark('4');
     init_pic();
+    dbg_mark('5');
     init_pit(100);
+    dbg_mark('6');
     cpu_sti();
+    dbg_mark('7');
 
     create_task(task_a);
     create_task(task_b);
+    dbg_mark('8');
 
     write_cstr("Scheduler: round-robin start\n");
+    dbg_mark('9');
     schedule();
 
     for (;;) {
