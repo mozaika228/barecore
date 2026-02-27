@@ -116,6 +116,8 @@ disk_error:
 
 [bits 32]
 protected_mode:
+    mov al, 'P'
+    call serial_putc_pm
     mov ax, DATA32_SEL
     mov ds, ax
     mov es, ax
@@ -157,11 +159,28 @@ protected_mode:
     or eax, 0x80000001    ; PG | PE
     mov cr0, eax
 
+    mov al, 'G'
+    call serial_putc_pm
+
     lgdt [gdt64_ptr]
+    mov al, 'J'
+    call serial_putc_pm
     jmp CODE64_SEL:long_mode
 
 [bits 64]
 long_mode:
+    mov dx, 0x3FD
+    mov ecx, 0x10000
+.wait64:
+    in al, dx
+    test al, 0x20
+    jnz .send64
+    loop .wait64
+.send64:
+    mov dx, 0x3F8
+    mov al, 'K'
+    out dx, al
+
     mov ax, DATA64_SEL
     mov ds, ax
     mov es, ax
@@ -173,6 +192,30 @@ long_mode:
     xor rdi, rdi
     mov rax, KERNEL_DEST
     jmp rax
+
+[bits 32]
+serial_putc_pm:
+    push eax
+    push ebx
+    push ecx
+    push edx
+    mov bl, al
+    mov ecx, 0xFFFF
+.wait:
+    mov dx, 0x3FD
+    in al, dx
+    test al, 0x20
+    jnz .send
+    loop .wait
+.send:
+    mov dx, 0x3F8
+    mov al, bl
+    out dx, al
+    pop edx
+    pop ecx
+    pop ebx
+    pop eax
+    ret
 
 align 8
 boot_drive db 0

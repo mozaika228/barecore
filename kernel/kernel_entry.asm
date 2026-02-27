@@ -13,6 +13,18 @@ extern syscall_dispatch
 section .text
 
 _start:
+    mov dx, 0x3FD
+    mov ecx, 0x10000
+.wait_tx:
+    in al, dx
+    test al, 0x20
+    jnz .send_mark
+    loop .wait_tx
+.send_mark:
+    mov dx, 0x3F8
+    mov al, 'X'
+    out dx, al
+
     mov rsp, 0x00200000
     call kmain
 .halt:
