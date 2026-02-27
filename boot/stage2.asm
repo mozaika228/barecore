@@ -115,6 +115,7 @@ long_mode:
     mov gs, ax
 
     mov rsp, 0x0009E000
+    xor rdi, rdi
     mov rax, KERNEL_DEST
     jmp rax
 

@@ -19,7 +19,7 @@ $objcopy = "${CrossPrefix}objcopy"
 & $nasm -f bin (Join-Path $root "boot\stage2.asm") -o (Join-Path $build "stage2.bin")
 & $nasm -f elf64 (Join-Path $root "kernel\kernel_entry.asm") -o (Join-Path $build "kernel_entry.o")
 
-& $gcc -ffreestanding -fno-pic -fno-stack-protector -m64 -mcmodel=kernel -mno-red-zone -O2 -Wall -Wextra `
+& $gcc -ffreestanding -fno-pic -fno-stack-protector -m64 -mcmodel=kernel -mno-red-zone -O2 -Wall -Wextra -I (Join-Path $root "include") `
     -c (Join-Path $root "kernel\kernel.c") -o (Join-Path $build "kernel.o")
 
 & $ld -nostdlib -z max-page-size=0x1000 -T (Join-Path $root "linker.ld") `

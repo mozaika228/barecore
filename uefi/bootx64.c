@@ -1,5 +1,8 @@
 #include <efi.h>
 #include <efilib.h>
+#include <protocol/GraphicsOutput.h>
+
+#include "../include/boot_info.h"
 
 #define KERNEL_LOAD_ADDR 0x00100000ULL
 
@@ -70,6 +73,33 @@ static EFI_STATUS load_kernel(EFI_HANDLE image, EFI_SYSTEM_TABLE *st, UINTN *ker
     return EFI_SUCCESS;
 }
 
+static void fill_boot_info(EFI_SYSTEM_TABLE *st, barecore_boot_info_t *bi) {
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
+    EFI_STATUS status;
+
+    bi->magic = BARECORE_BOOTINFO_MAGIC;
+    bi->framebuffer_base = 0;
+    bi->framebuffer_width = 0;
+    bi->framebuffer_height = 0;
+    bi->framebuffer_pitch_pixels = 0;
+    bi->framebuffer_bpp = 0;
+    bi->framebuffer_format = 0;
+    bi->reserved = 0;
+
+    status = uefi_call_wrapper(st->BootServices->LocateProtocol, 3,
+                               &GraphicsOutputProtocol, NULL, (void **)&gop);
+    if (EFI_ERROR(status) || gop == NULL || gop->Mode == NULL || gop->Mode->Info == NULL) {
+        return;
+    }
+
+    bi->framebuffer_base = gop->Mode->FrameBufferBase;
+    bi->framebuffer_width = gop->Mode->Info->HorizontalResolution;
+    bi->framebuffer_height = gop->Mode->Info->VerticalResolution;
+    bi->framebuffer_pitch_pixels = gop->Mode->Info->PixelsPerScanLine;
+    bi->framebuffer_bpp = 32;
+    bi->framebuffer_format = gop->Mode->Info->PixelFormat;
+}
+
 EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     EFI_STATUS status;
     UINTN kernel_size = 0;
@@ -78,7 +108,9 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     UINTN desc_size = 0;
     UINT32 desc_version = 0;
     EFI_MEMORY_DESCRIPTOR *mmap = NULL;
-    void (*kernel_entry)(void) = (void (*)(void))(UINTN)KERNEL_LOAD_ADDR;
+    barecore_boot_info_t boot_info;
+    void (*kernel_entry)(barecore_boot_info_t *) =
+        (void (*)(barecore_boot_info_t *))(UINTN)KERNEL_LOAD_ADDR;
 
     InitializeLib(image, st);
     Print(L"barecore UEFI loader\r\n");
@@ -88,6 +120,8 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
         Print(L"kernel load failed: %r\r\n", status);
         return status;
     }
+
+    fill_boot_info(st, &boot_info);
 
     status = uefi_call_wrapper(st->BootServices->GetMemoryMap, 5,
                                &mmap_size, mmap, &map_key, &desc_size, &desc_version);
@@ -116,6 +150,6 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
     }
 
     (void)kernel_size;
-    kernel_entry();
+    kernel_entry(&boot_info);
     return EFI_SUCCESS;
 }

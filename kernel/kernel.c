@@ -1,6 +1,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "../include/boot_info.h"
+
 #define IDT_ENTRIES 256
 #define MAX_TASKS 4
 #define STACK_SIZE 4096
@@ -14,8 +16,11 @@
 #define PIT_COMMAND  0x43
 #define PIT_CHANNEL0 0x40
 
-#define IRQ0_VECTOR    32
-#define SYSCALL_VECTOR 0x80
+#define COM1_PORT    0x3F8
+#define QEMU_EXIT_PORT 0xF4
+
+#define IRQ0_VECTOR     32
+#define SYSCALL_VECTOR  0x80
 
 #define SYS_WRITE 1
 #define SYS_EXIT  2
@@ -60,6 +65,20 @@ typedef struct {
     uint8_t exited;
 } task_t;
 
+typedef struct {
+    uint64_t addr;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pitch_pixels;
+    uint32_t bpp;
+    uint32_t format;
+    uint32_t cursor_x;
+    uint32_t cursor_y;
+    uint32_t fg;
+    uint32_t bg;
+    uint8_t enabled;
+} fb_console_t;
+
 extern void idt_load(idtr_t *idtr);
 extern void isr_timer_stub(void);
 extern void isr_syscall_stub(void);
@@ -70,6 +89,7 @@ static idtr_t idtr;
 
 static volatile uint16_t *const vga = (volatile uint16_t *)0xB8000;
 static uint16_t vga_pos = 0;
+static fb_console_t fb;
 
 static volatile uint64_t ticks = 0;
 static task_t tasks[MAX_TASKS];
@@ -100,7 +120,89 @@ static inline void cpu_sti(void) {
     __asm__ volatile("sti");
 }
 
-static void put_char(char c) {
+static inline uint32_t rgb_to_pixel(uint32_t rgb, uint32_t format) {
+    uint32_t r = (rgb >> 16) & 0xFF;
+    uint32_t g = (rgb >> 8) & 0xFF;
+    uint32_t b = rgb & 0xFF;
+    if (format == 0) { /* PixelRedGreenBlueReserved8BitPerColor */
+        return (r << 16) | (g << 8) | b;
+    }
+    return (b << 16) | (g << 8) | r; /* PixelBlueGreenRed... or fallback */
+}
+
+static void serial_init(void) {
+    outb(COM1_PORT + 1, 0x00);
+    outb(COM1_PORT + 3, 0x80);
+    outb(COM1_PORT + 0, 0x03);
+    outb(COM1_PORT + 1, 0x00);
+    outb(COM1_PORT + 3, 0x03);
+    outb(COM1_PORT + 2, 0xC7);
+    outb(COM1_PORT + 4, 0x0B);
+}
+
+static void serial_put_char(char c) {
+    while ((inb(COM1_PORT + 5) & 0x20) == 0) {
+    }
+    outb(COM1_PORT, (uint8_t)c);
+}
+
+static void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color) {
+    if (!fb.enabled || x >= fb.width || y >= fb.height) {
+        return;
+    }
+    uint32_t *base = (uint32_t *)(uintptr_t)fb.addr;
+    base[(y * fb.pitch_pixels) + x] = color;
+}
+
+static void fb_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color) {
+    for (uint32_t yy = 0; yy < h; ++yy) {
+        for (uint32_t xx = 0; xx < w; ++xx) {
+            fb_put_pixel(x + xx, y + yy, color);
+        }
+    }
+}
+
+/* Minimal pseudo-glyph renderer: readable block-style fallback for framebuffer. */
+static void fb_draw_char(char c) {
+    const uint32_t cw = 8;
+    const uint32_t ch = 16;
+    uint32_t px = fb.cursor_x * cw;
+    uint32_t py = fb.cursor_y * ch;
+    uint32_t fg = rgb_to_pixel(fb.fg, fb.format);
+    uint32_t bg = rgb_to_pixel(fb.bg, fb.format);
+
+    if (c == '\n') {
+        fb.cursor_x = 0;
+        fb.cursor_y++;
+        return;
+    }
+
+    fb_fill_rect(px, py, cw, ch, bg);
+
+    /* Draw a simple 6x10 frame + pattern derived from character code. */
+    fb_fill_rect(px + 1, py + 1, 6, 1, fg);
+    fb_fill_rect(px + 1, py + 10, 6, 1, fg);
+    fb_fill_rect(px + 1, py + 1, 1, 10, fg);
+    fb_fill_rect(px + 6, py + 1, 1, 10, fg);
+    for (uint32_t bit = 0; bit < 6; ++bit) {
+        if (((uint8_t)c >> bit) & 1U) {
+            fb_fill_rect(px + 1 + bit, py + 12, 1, 3, fg);
+        }
+    }
+
+    fb.cursor_x++;
+    if ((fb.cursor_x + 1) * cw >= fb.width) {
+        fb.cursor_x = 0;
+        fb.cursor_y++;
+    }
+    if ((fb.cursor_y + 1) * ch >= fb.height) {
+        fb.cursor_x = 0;
+        fb.cursor_y = 0;
+        fb_fill_rect(0, 0, fb.width, fb.height, bg);
+    }
+}
+
+static void vga_put_char(char c) {
     if (c == '\n') {
         vga_pos = (uint16_t)((vga_pos / 80 + 1) * 80);
         return;
@@ -108,6 +210,15 @@ static void put_char(char c) {
     vga[vga_pos++] = (uint16_t)(0x0F00 | (uint8_t)c);
     if (vga_pos >= 80 * 25) {
         vga_pos = 0;
+    }
+}
+
+static void put_char(char c) {
+    serial_put_char(c);
+    if (fb.enabled) {
+        fb_draw_char(c);
+    } else {
+        vga_put_char(c);
     }
 }
 
@@ -121,6 +232,31 @@ static void write_cstr(const char *s) {
     while (*s) {
         put_char(*s++);
     }
+}
+
+static void init_console(const barecore_boot_info_t *bi) {
+    fb.enabled = 0;
+    fb.cursor_x = 0;
+    fb.cursor_y = 0;
+    fb.fg = 0xFFFFFF;
+    fb.bg = 0x101820;
+
+    if (bi == NULL || bi->magic != BARECORE_BOOTINFO_MAGIC) {
+        return;
+    }
+    if (bi->framebuffer_base == 0 || bi->framebuffer_bpp < 24) {
+        return;
+    }
+
+    fb.addr = bi->framebuffer_base;
+    fb.width = bi->framebuffer_width;
+    fb.height = bi->framebuffer_height;
+    fb.pitch_pixels = bi->framebuffer_pitch_pixels;
+    fb.bpp = bi->framebuffer_bpp;
+    fb.format = bi->framebuffer_format;
+    fb.enabled = 1;
+
+    fb_fill_rect(0, 0, fb.width, fb.height, rgb_to_pixel(fb.bg, fb.format));
 }
 
 static void idt_set_gate(uint8_t vector, void (*handler)(void), uint8_t flags) {
@@ -147,11 +283,6 @@ static void init_idt(void) {
 }
 
 static void init_pic(void) {
-    uint8_t mask1 = inb(PIC1_DATA);
-    uint8_t mask2 = inb(PIC2_DATA);
-    (void)mask1;
-    (void)mask2;
-
     outb(PIC1_COMMAND, 0x11);
     io_wait();
     outb(PIC2_COMMAND, 0x11);
@@ -214,9 +345,11 @@ static void schedule(void) {
         return;
     }
 
-    int prev = current_task;
-    current_task = next;
-    switch_context(&tasks[prev].rsp, &tasks[next].rsp);
+    {
+        int prev = current_task;
+        current_task = next;
+        switch_context(&tasks[prev].rsp, &tasks[next].rsp);
+    }
 }
 
 static int create_task(void (*entry)(void)) {
@@ -282,19 +415,13 @@ void syscall_dispatch(regs_t *regs) {
 
 static inline long syscall2(long num, long a0, long a1) {
     long ret;
-    __asm__ volatile("int $0x80"
-                     : "=a"(ret)
-                     : "a"(num), "D"(a0), "S"(a1)
-                     : "memory");
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(num), "D"(a0), "S"(a1) : "memory");
     return ret;
 }
 
 static inline long syscall1(long num, long a0) {
     long ret;
-    __asm__ volatile("int $0x80"
-                     : "=a"(ret)
-                     : "a"(num), "D"(a0)
-                     : "memory");
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(num), "D"(a0) : "memory");
     return ret;
 }
 
@@ -336,8 +463,12 @@ static void task_b(void) {
     userspace_exit();
 }
 
-void kmain(void) {
+void kmain(const barecore_boot_info_t *boot_info) {
+    serial_init();
+    init_console(boot_info);
+
     write_cstr("Kernel: long mode OK\n");
+    write_cstr("IDT/PIC/PIT init\n");
 
     init_idt();
     init_pic();
@@ -347,7 +478,7 @@ void kmain(void) {
     create_task(task_a);
     create_task(task_b);
 
-    write_cstr("Scheduler: starting\n");
+    write_cstr("Scheduler: round-robin start\n");
     schedule();
 
     for (;;) {
@@ -360,6 +491,7 @@ void kmain(void) {
         }
         if (!live) {
             write_cstr("All tasks finished\n");
+            outb(QEMU_EXIT_PORT, 0x10);
             for (;;) {
                 cpu_halt();
             }
