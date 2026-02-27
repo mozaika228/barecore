@@ -141,6 +141,10 @@ static void serial_init(void) {
 }
 
 static void serial_put_char(char c) {
+    uint32_t spin = 10000;
+    while ((inb(COM1_PORT + 5) & 0x20) == 0 && spin > 0) {
+        spin--;
+    }
     outb(COM1_PORT, (uint8_t)c);
 }
 
@@ -475,7 +479,7 @@ void kmain(const barecore_boot_info_t *boot_info) {
         :
         : "ax", "dx");
 
-    serial_init();
+    /* Keep firmware/BIOS serial state untouched for CI-friendly capture. */
     init_console(boot_info);
 
     write_cstr("Kernel: long mode OK\n");
