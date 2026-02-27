@@ -8,7 +8,7 @@ EFI_OBJCOPY ?= objcopy
 
 BUILD_DIR := build
 STAGE2_SECTORS := 8
-KERNEL_SECTORS := 64
+KERNEL_SECTORS := 256
 
 CFLAGS := -ffreestanding -fno-pic -fno-stack-protector -m64 -mcmodel=kernel -mno-red-zone -O2 -Wall -Wextra
 EFI_CFLAGS ?= -fpic -fshort-wchar -mno-red-zone -Wall -Wextra -I/usr/include/efi -I/usr/include/efi/x86_64
@@ -19,7 +19,7 @@ EFI_LDFLAGS ?= -nostdlib -znocombreloc -T $(EFI_LDS) -shared -Bsymbolic
 EFI_LIBS ?= -L$(EFI_LIBDIR) -lefi -lgnuefi
 OVMF ?= OVMF.fd
 
-.PHONY: all clean run uefi run-uefi ci-smoke
+.PHONY: all clean run uefi run-uefi ci-smoke verify-kernel-size
 
 all: $(BUILD_DIR)/os.img
 
@@ -66,7 +66,15 @@ $(BUILD_DIR)/esp/kernel.bin: $(BUILD_DIR)/kernel.bin
 
 uefi: $(BUILD_DIR)/esp/EFI/BOOT/BOOTX64.EFI $(BUILD_DIR)/esp/kernel.bin
 
-$(BUILD_DIR)/os.img: $(BUILD_DIR)/boot.bin $(BUILD_DIR)/stage2.bin $(BUILD_DIR)/kernel.bin
+verify-kernel-size: $(BUILD_DIR)/kernel.bin
+	@size=$$(wc -c < $(BUILD_DIR)/kernel.bin); \
+	max=$$(( $(KERNEL_SECTORS) * 512 )); \
+	if [ $$size -gt $$max ]; then \
+		echo "kernel.bin too large: $$size bytes (max $$max). Increase KERNEL_SECTORS in boot/stage2.asm and Makefile."; \
+		exit 1; \
+	fi
+
+$(BUILD_DIR)/os.img: $(BUILD_DIR)/boot.bin $(BUILD_DIR)/stage2.bin $(BUILD_DIR)/kernel.bin verify-kernel-size
 	dd if=/dev/zero of=$@ bs=512 count=2880
 	dd if=$(BUILD_DIR)/boot.bin of=$@ conv=notrunc
 	dd if=$(BUILD_DIR)/stage2.bin of=$@ bs=512 seek=1 conv=notrunc
