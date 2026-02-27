@@ -141,7 +141,9 @@ static void serial_init(void) {
 }
 
 static void serial_put_char(char c) {
-    while ((inb(COM1_PORT + 5) & 0x20) == 0) {
+    uint32_t spin = 100000;
+    while ((inb(COM1_PORT + 5) & 0x20) == 0 && spin > 0) {
+        spin--;
     }
     outb(COM1_PORT, (uint8_t)c);
 }

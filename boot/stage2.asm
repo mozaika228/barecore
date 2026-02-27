@@ -18,10 +18,16 @@ PD_BASE         equ 0x00092000
 
 stage2_start:
     cli
+    cld
     mov [boot_drive], dl
+    call serial_init
+    mov al, 'S'
+    call serial_putc
 
     call enable_a20
     call load_kernel
+    mov al, 'L'
+    call serial_putc
 
     lgdt [gdt32_ptr]
 
@@ -44,7 +50,56 @@ load_kernel:
     jc disk_error
     ret
 
+serial_init:
+    mov dx, 0x3F9
+    mov al, 0x00
+    out dx, al
+    mov dx, 0x3FB
+    mov al, 0x80
+    out dx, al
+    mov dx, 0x3F8
+    mov al, 0x03
+    out dx, al
+    mov dx, 0x3F9
+    mov al, 0x00
+    out dx, al
+    mov dx, 0x3FB
+    mov al, 0x03
+    out dx, al
+    mov dx, 0x3FA
+    mov al, 0xC7
+    out dx, al
+    mov dx, 0x3FC
+    mov al, 0x0B
+    out dx, al
+    ret
+
+serial_putc:
+    push ax
+    push bx
+    push cx
+    push dx
+    mov bl, al
+    mov cx, 0xFFFF
+.wait:
+    mov dx, 0x3FD
+    in al, dx
+    test al, 0x20
+    jnz .send
+    loop .wait
+.send:
+    mov dx, 0x3F8
+    mov al, bl
+    out dx, al
+    pop dx
+    pop cx
+    pop bx
+    pop ax
+    ret
+
 disk_error:
+    mov al, 'E'
+    call serial_putc
     mov si, err_msg
 .print:
     lodsb
