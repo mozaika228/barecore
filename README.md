@@ -1,4 +1,4 @@
-# Bootloader + Minimal Kernel (x86_64, BIOS path)
+# barecore (x86_64, BIOS path)
 
 This project is a minimal educational OS skeleton:
 
