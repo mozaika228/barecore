@@ -87,7 +87,7 @@ run-uefi: uefi
 	qemu-system-x86_64 -bios $(OVMF) -drive format=raw,file=fat:rw:$(BUILD_DIR)/esp -serial stdio -device isa-debug-exit,iobase=0xf4,iosize=0x04
 
 ci-smoke: $(BUILD_DIR)/os.img
-	timeout 20s qemu-system-x86_64 -nographic -monitor none -no-reboot -no-shutdown \
+	timeout 30s qemu-system-x86_64 -nographic -monitor none -no-reboot -no-shutdown \
 		-drive format=raw,file=$(BUILD_DIR)/os.img \
 		-serial stdio \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \

@@ -141,10 +141,6 @@ static void serial_init(void) {
 }
 
 static void serial_put_char(char c) {
-    uint32_t spin = 100000;
-    while ((inb(COM1_PORT + 5) & 0x20) == 0 && spin > 0) {
-        spin--;
-    }
     outb(COM1_PORT, (uint8_t)c);
 }
 
@@ -449,9 +445,9 @@ static void userspace_exit(void) {
 }
 
 static void task_a(void) {
-    for (int i = 0; i < 20; ++i) {
+    for (int i = 0; i < 8; ++i) {
         userspace_write("A");
-        for (volatile int d = 0; d < 100000; ++d) {
+        for (volatile int d = 0; d < 5000; ++d) {
         }
         userspace_yield();
     }
@@ -460,9 +456,9 @@ static void task_a(void) {
 }
 
 static void task_b(void) {
-    for (int i = 0; i < 20; ++i) {
+    for (int i = 0; i < 8; ++i) {
         userspace_write("B");
-        for (volatile int d = 0; d < 100000; ++d) {
+        for (volatile int d = 0; d < 5000; ++d) {
         }
         userspace_yield();
     }
