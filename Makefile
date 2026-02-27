@@ -8,7 +8,7 @@ EFI_OBJCOPY ?= objcopy
 
 BUILD_DIR := build
 STAGE2_SECTORS := 8
-KERNEL_SECTORS := 256
+KERNEL_SECTORS := 64
 
 CFLAGS := -ffreestanding -fno-pic -fno-stack-protector -m64 -mcmodel=kernel -mno-red-zone -O2 -Wall -Wextra
 EFI_CFLAGS ?= -fpic -fshort-wchar -mno-red-zone -Wall -Wextra -I/usr/include/efi -I/usr/include/efi/x86_64
@@ -87,11 +87,11 @@ run-uefi: uefi
 	qemu-system-x86_64 -bios $(OVMF) -drive format=raw,file=fat:rw:$(BUILD_DIR)/esp -serial stdio -device isa-debug-exit,iobase=0xf4,iosize=0x04
 
 ci-smoke: $(BUILD_DIR)/os.img
-	timeout 20s qemu-system-x86_64 -display none -no-reboot -no-shutdown \
+	timeout 20s qemu-system-x86_64 -nographic -monitor none -no-reboot -no-shutdown \
 		-drive format=raw,file=$(BUILD_DIR)/os.img \
 		-serial stdio \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-		| tee $(BUILD_DIR)/qemu.log
+		2>&1 | tee $(BUILD_DIR)/qemu.log
 	grep -q "Kernel: long mode OK" $(BUILD_DIR)/qemu.log
 	grep -q "Scheduler: round-robin start" $(BUILD_DIR)/qemu.log
 	grep -q "All tasks finished" $(BUILD_DIR)/qemu.log

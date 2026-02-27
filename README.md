@@ -13,7 +13,7 @@ Educational x86_64 OS skeleton:
 - Minimal syscalls: `write`, `exit`, `yield`
 
 Current BIOS loader limit:
-- Stage2 loads a fixed `KERNEL_SECTORS=256` (must stay in sync with `boot/stage2.asm` and `Makefile`)
+- Stage2 loads a fixed `KERNEL_SECTORS=64` (must stay in sync with `boot/stage2.asm` and `Makefile`)
 
 ## Mode transition scheme
 

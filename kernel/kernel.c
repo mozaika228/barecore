@@ -332,6 +332,11 @@ static int pick_next_task(void) {
 static void schedule(void) {
     int next = pick_next_task();
     if (next < 0) {
+        if (current_task >= 0) {
+            int prev = current_task;
+            current_task = -1;
+            switch_context(&tasks[prev].rsp, &kernel_rsp);
+        }
         return;
     }
 
