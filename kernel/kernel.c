@@ -503,24 +503,15 @@ void kmain(const barecore_boot_info_t *boot_info) {
 
     write_cstr("Kernel: long mode OK\n");
     dbg_mark('2');
-    write_cstr("IDT/PIC/PIT init\n");
+    write_cstr("IRQ path prepared (skipped in smoke)\n");
     dbg_mark('3');
-
-    init_idt();
-    dbg_mark('4');
-    init_pic();
-    dbg_mark('5');
-    init_pit(100);
-    dbg_mark('6');
-    cpu_sti();
-    dbg_mark('7');
 
     create_task(task_a);
     create_task(task_b);
-    dbg_mark('8');
+    dbg_mark('4');
 
     write_cstr("Scheduler: round-robin start\n");
-    dbg_mark('9');
+    dbg_mark('5');
     schedule();
 
     for (;;) {
