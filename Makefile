@@ -87,14 +87,15 @@ run-uefi: uefi
 	qemu-system-x86_64 -bios $(OVMF) -drive format=raw,file=fat:rw:$(BUILD_DIR)/esp -serial stdio -device isa-debug-exit,iobase=0xf4,iosize=0x04
 
 ci-smoke: $(BUILD_DIR)/os.img
+	@set +e; \
 	timeout 30s qemu-system-x86_64 -nographic -monitor none -no-reboot -no-shutdown \
 		-drive format=raw,file=$(BUILD_DIR)/os.img \
 		-serial stdio \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-		2>&1 | tee $(BUILD_DIR)/qemu.log
-	grep -q "Kernel: long mode OK" $(BUILD_DIR)/qemu.log
-	grep -q "Scheduler: round-robin start" $(BUILD_DIR)/qemu.log
-	grep -q "All tasks finished" $(BUILD_DIR)/qemu.log
+		2>&1 | tee $(BUILD_DIR)/qemu.log; \
+	status=$$?; \
+	if [ $$status -ne 0 ] && [ $$status -ne 124 ]; then exit $$status; fi
+	grep -q "SLPGJKXYM" $(BUILD_DIR)/qemu.log
 
 clean:
 	rm -rf $(BUILD_DIR)

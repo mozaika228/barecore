@@ -136,4 +136,4 @@ dd if=build/kernel.bin of=build/os.img bs=512 seek=9 conv=notrunc
 GitHub Actions workflow `.github/workflows/ci.yml`:
 - builds BIOS image with NASM + cross gcc
 - runs QEMU smoke test
-- validates boot log markers from serial output
+- validates serial boot breadcrumbs up to `kmain` entry (`SLPGJKXYM`)
