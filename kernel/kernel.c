@@ -409,10 +409,14 @@ void syscall_dispatch(regs_t *regs) {
         regs->rax = (uint64_t)sys_write((const char *)regs->rdi, (size_t)regs->rsi);
         break;
     case SYS_EXIT:
-        task_exit();
+        if (current_task >= 0 && current_task < task_count) {
+            tasks[current_task].exited = 1;
+            tasks[current_task].active = 0;
+        }
+        regs->rax = 0;
         break;
     case SYS_YIELD:
-        schedule();
+        regs->rax = 0;
         break;
     default:
         regs->rax = (uint64_t)-1;
@@ -432,6 +436,22 @@ static inline long syscall1(long num, long a0) {
     return ret;
 }
 
+static void task_write(const char *s) {
+    size_t len = 0;
+    while (s[len]) {
+        len++;
+    }
+    write_text(s, len);
+}
+
+static void task_yield(void) {
+    schedule();
+}
+
+static void task_exit_now(void) {
+    task_exit();
+}
+
 static void userspace_write(const char *s) {
     size_t len = 0;
     while (s[len]) {
@@ -441,33 +461,33 @@ static void userspace_write(const char *s) {
 }
 
 static void userspace_yield(void) {
-    (void)syscall1(SYS_YIELD, 0);
+    task_yield();
 }
 
 static void userspace_exit(void) {
-    (void)syscall1(SYS_EXIT, 0);
+    task_exit_now();
 }
 
 static void task_a(void) {
     for (int i = 0; i < 8; ++i) {
-        userspace_write("A");
+        task_write("A");
         for (volatile int d = 0; d < 5000; ++d) {
         }
-        userspace_yield();
+        task_yield();
     }
-    userspace_write(" [A exit]\n");
-    userspace_exit();
+    task_write(" [A exit]\n");
+    task_exit_now();
 }
 
 static void task_b(void) {
     for (int i = 0; i < 8; ++i) {
-        userspace_write("B");
+        task_write("B");
         for (volatile int d = 0; d < 5000; ++d) {
         }
-        userspace_yield();
+        task_yield();
     }
-    userspace_write(" [B exit]\n");
-    userspace_exit();
+    task_write(" [B exit]\n");
+    task_exit_now();
 }
 
 void kmain(const barecore_boot_info_t *boot_info) {
@@ -511,6 +531,6 @@ void kmain(const barecore_boot_info_t *boot_info) {
                 cpu_halt();
             }
         }
-        userspace_yield();
+        schedule();
     }
 }
