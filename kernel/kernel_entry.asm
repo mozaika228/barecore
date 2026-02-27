@@ -25,6 +25,10 @@ _start:
     mov al, 'X'
     out dx, al
 
+    mov dx, 0x3F8
+    mov al, 'Y'
+    out dx, al
+
     mov rsp, 0x00200000
     call kmain
 .halt:

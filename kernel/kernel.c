@@ -467,6 +467,14 @@ static void task_b(void) {
 }
 
 void kmain(const barecore_boot_info_t *boot_info) {
+    __asm__ volatile(
+        "movw $0x3F8, %%dx\n\t"
+        "movb $'M', %%al\n\t"
+        "outb %%al, %%dx\n\t"
+        :
+        :
+        : "ax", "dx");
+
     serial_init();
     init_console(boot_info);
 
