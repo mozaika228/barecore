@@ -1,139 +1,209 @@
 # barecore
 [![CI](https://github.com/mozaika228/barecore/actions/workflows/ci.yml/badge.svg)](https://github.com/mozaika228/barecore/actions/workflows/ci.yml)
 
-Educational x86_64 OS skeleton:
-- BIOS bootloader (stage1 512B + stage2)
-- UEFI loader (`BOOTX64.EFI`)
-- Real mode -> protected mode -> long mode
-- GDT/IDT setup and timer interrupts (PIC/PIT)
-- VGA text mode output (`0xB8000`) with framebuffer fallback for UEFI
-- Context switch (save/restore registers)
-- Round-robin scheduler
-- Two test processes (`A` and `B`)
-- Minimal syscalls: `write`, `exit`, `yield`
+`barecore` is a low-level x86_64 OS project with an ASM boot path and a C kernel.
 
-Current BIOS loader limit:
-- Stage2 loads a fixed `KERNEL_SECTORS=64` (must stay in sync with `boot/stage2.asm` and `Makefile`)
-
-## Mode transition scheme
+## Architecture Overview
 
 ```text
-BIOS path:
-  16-bit real mode (boot.asm @ 0x7C00)
-    -> load stage2
-    -> enable A20
-    -> load GDT
-    -> CR0.PE=1
-  32-bit protected mode (stage2.asm)
-    -> build PML4/PDPT/PD
-    -> CR4.PAE=1
-    -> EFER.LME=1
-    -> CR0.PG=1
-  64-bit long mode
-    -> jump to kernel entry (_start)
+BIOS boot flow
+--------------
+boot/boot.asm (16-bit, 512 bytes, @0x7C00)
+  -> loads boot/stage2.asm from disk
+  -> transfers control to stage2
 
-UEFI path:
-  UEFI firmware (already 64-bit)
-    -> BOOTX64.EFI loads kernel.bin at 0x00100000
-    -> collects GOP framebuffer info
-    -> ExitBootServices
-    -> jump to kernel entry (_start)
+boot/stage2.asm
+  real mode:
+    - A20 enable
+    - kernel.bin read via INT 13h extensions
+  protected mode:
+    - GDT load
+    - CR0.PE=1
+  long mode transition:
+    - 4-level paging setup (PML4/PDPT/PD, identity map)
+    - CR4.PAE=1, EFER.LME=1, CR0.PG=1
+    - far jump to 64-bit code
+  -> jump to kernel entry @ 0x00100000
+
+kernel/kernel_entry.asm
+  - _start (64-bit)
+  - IDT loader helper
+  - context switch primitive
+  - ISR stubs for:
+      #DE, #PF, IRQ0(timer), IRQ1(keyboard), int 0x80(syscall)
+
+kernel/kernel.c
+  - console (serial + VGA / framebuffer fallback)
+  - exceptions and IRQ handlers
+  - scheduler and task model
+  - syscalls and mini-shell
+  - in-memory initrd-like file table
 ```
 
-## Project layout
+## GDT/IDT Layout
 
-- `boot/boot.asm` - BIOS stage1 (512 bytes)
-- `boot/stage2.asm` - BIOS stage2 + mode transitions
-- `kernel/kernel_entry.asm` - kernel entry, IDT load, ISR stubs, context switch asm
-- `kernel/kernel.c` - IDT/PIC/PIT, console output, scheduler, syscall dispatcher
-- `uefi/bootx64.c` - UEFI loader + GOP framebuffer handoff
-- `include/boot_info.h` - shared boot info contract (UEFI -> kernel)
-- `linker.ld` - kernel linker script
-- `Makefile` - BIOS/UEFI build and run targets
+### GDT (configured in `boot/stage2.asm`)
+- null descriptor
+- 32-bit code segment
+- 32-bit data segment
+- 64-bit code segment
+- 64-bit data segment
 
-## Quick start (Linux, detailed)
+### IDT (configured in `kernel/kernel.c`)
+- `0`: divide-by-zero (`#DE`)
+- `14`: page fault (`#PF`)
+- `32`: PIT timer IRQ0
+- `33`: PS/2 keyboard IRQ1
+- `0x80`: syscall trap
 
-### 1) Install dependencies
+## Memory Map
+
+Key regions (BIOS path):
+- `0x00007C00`: stage1 boot sector
+- `0x00008000`: stage2 loader
+- `0x00090000`: PML4
+- `0x00091000`: PDPT
+- `0x00092000`: PD
+- `0x00100000`: kernel image load address
+- `0x00200000`: kernel bootstrap stack top
+- `0x000B8000`: VGA text buffer (BIOS console fallback)
+
+BIOS kernel loader constraint:
+- fixed `KERNEL_SECTORS=64` in both:
+  - `boot/stage2.asm`
+  - `Makefile`
+
+## Kernel Features
+
+### Interrupts and Exceptions
+- PIT timer IRQ (`IRQ0`)
+- PS/2 keyboard IRQ (`IRQ1`)
+- divide-by-zero handler with explicit panic message
+- page-fault handler with fault address (`CR2`) and error code
+
+### Scheduler and Processes
+- context switch in ASM (`switch_context`)
+- round-robin scheduler in C
+- sleep/wake based on PIT ticks
+- three tasks by default:
+  - `task_a` (prints `A`)
+  - `task_b` (prints `B`)
+  - `task_shell` (interactive shell)
+
+### Syscalls
+Implemented syscall ABI and dispatch table:
+- `write`
+- `exit`
+- `getpid`
+- `sleep`
+- `yield`
+
+Current kernel tasks use the same backend services directly for stability; `int 0x80` path is present for user-mode extension work.
+
+### Console and Graphics
+- serial output (`COM1`) for debugging/CI
+- VGA text mode (`0xB8000`) on BIOS path
+- framebuffer fallback on UEFI path (GOP metadata from `uefi/bootx64.c`)
+- pixel primitive API in kernel (`fb_put_pixel`)
+
+### Filesystem (initrd-style)
+- in-memory file table for shell commands (`ls`, `cat`)
+- designed as an initrd stepping stone before on-disk FAT/Minix implementation
+
+### Shell
+Keyboard-driven shell commands:
+- `help`
+- `ls`
+- `cat <file>`
+- `echo <text>`
+- `clear`
+- `pid`
+- `sleep <ms>`
+
+## Build & Run
+
+### Dependencies (Linux)
 
 ```bash
 sudo apt-get update
 sudo apt-get install -y \
-  nasm make qemu-system-x86 \
+  nasm make qemu-system-x86 gdb \
   gcc-x86-64-linux-gnu binutils-x86-64-linux-gnu \
   gnu-efi ovmf
 ```
 
-### 2) Build BIOS image (via Makefile)
+### Build BIOS image
 
 ```bash
 make CROSS=x86_64-linux-gnu-
 ```
 
-Result: `build/os.img`
+Output:
+- `build/kernel.elf`
+- `build/kernel.bin`
+- `build/os.img`
 
-### 3) Run BIOS image in QEMU
-
-```bash
-qemu-system-x86_64 \
-  -drive format=raw,file=build/os.img \
-  -serial stdio \
-  -device isa-debug-exit,iobase=0xf4,iosize=0x04
-```
-
-### 4) Build UEFI loader + ESP tree
+### Run BIOS image
 
 ```bash
-make CROSS=x86_64-linux-gnu- uefi OVMF=/usr/share/OVMF/OVMF_CODE.fd
+make CROSS=x86_64-linux-gnu- run
 ```
 
-Result:
-- `build/esp/EFI/BOOT/BOOTX64.EFI`
-- `build/esp/kernel.bin`
-
-### 5) Run UEFI in QEMU
+Or:
 
 ```bash
-qemu-system-x86_64 \
-  -bios /usr/share/OVMF/OVMF_CODE.fd \
-  -drive format=raw,file=fat:rw:build/esp \
-  -serial stdio \
-  -device isa-debug-exit,iobase=0xf4,iosize=0x04
+scripts/run-bios.sh
 ```
 
-## Quick start (manual NASM + linker commands)
+### Build/Run UEFI path
 
 ```bash
-mkdir -p build
-nasm -f bin boot/boot.asm -o build/boot.bin
-nasm -f bin boot/stage2.asm -o build/stage2.bin
-nasm -f elf64 kernel/kernel_entry.asm -o build/kernel_entry.o
-x86_64-linux-gnu-gcc -ffreestanding -fno-pic -fno-stack-protector -m64 -mcmodel=kernel -mno-red-zone -O2 -Wall -Wextra -Iinclude -c kernel/kernel.c -o build/kernel.o
-x86_64-linux-gnu-ld -nostdlib -z max-page-size=0x1000 -T linker.ld -o build/kernel.elf build/kernel_entry.o build/kernel.o
-x86_64-linux-gnu-objcopy -O binary build/kernel.elf build/kernel.bin
-dd if=/dev/zero of=build/os.img bs=512 count=2880
-dd if=build/boot.bin of=build/os.img conv=notrunc
-dd if=build/stage2.bin of=build/os.img bs=512 seek=1 conv=notrunc
-dd if=build/kernel.bin of=build/os.img bs=512 seek=9 conv=notrunc
+make CROSS=x86_64-linux-gnu- uefi
+make CROSS=x86_64-linux-gnu- run-uefi OVMF=/usr/share/OVMF/OVMF_CODE.fd
 ```
 
-## What is implemented
+## Debugging with gdb + QEMU
 
-- GDT setup: in BIOS stage2 before protected/long mode jumps
-- IDT setup: in `kernel.c` with timer and syscall vectors
-- 64-bit transition: CR0/CR4/EFER + 4-level paging in stage2
-- Output:
-  - BIOS: VGA text mode (`0xB8000`)
-  - UEFI: framebuffer fallback via GOP handoff
-  - Serial: COM1 mirror for debugging/CI
-- Context switch: `switch_context` saves/restores callee-saved regs + stack pointer
-- Scheduler: cooperative round-robin
-- Test processes:
-  - `task_a()` prints `A`
-  - `task_b()` prints `B`
+Start QEMU stopped with gdb-server on `:1234`:
 
-## CI
+```bash
+make CROSS=x86_64-linux-gnu- run-gdb
+```
 
-GitHub Actions workflow `.github/workflows/ci.yml`:
-- builds BIOS image with NASM + cross gcc
-- runs QEMU smoke test
-- validates serial boot breadcrumbs up to `kmain` entry (`SLPGJKXYM`)
+In another terminal:
+
+```bash
+gdb build/kernel.elf
+(gdb) target remote :1234
+(gdb) b kmain
+(gdb) c
+```
+
+Alternative launcher:
+
+```bash
+scripts/run-bios-gdb.sh
+```
+
+## CI and Automated Output Checks
+
+`ci-smoke` verifies deterministic boot breadcrumbs through `kmain` entry:
+- expected marker stream contains `SLPGJKXYM`
+
+```bash
+make CROSS=x86_64-linux-gnu- ci-smoke
+```
+
+`ci-runtime` validates runtime banner lines:
+
+```bash
+make CROSS=x86_64-linux-gnu- ci-runtime
+```
+
+## Roadmap
+
+- APIC timer backend (keep PIT as fallback)
+- ring3 user mode and full syscall transition path
+- on-disk FAT12/16 reader for real initrd/image loading
+- simplified `fork/exec` process API
+- richer framebuffer text/graphics renderer

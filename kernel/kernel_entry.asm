@@ -4,28 +4,61 @@ global _start
 global idt_load
 global switch_context
 global isr_timer_stub
+global isr_keyboard_stub
 global isr_syscall_stub
+global isr_divide_stub
+global isr_page_fault_stub
 
 extern kmain
 extern irq_timer_handler
+extern irq_keyboard_handler
 extern syscall_dispatch
+extern exception_divide_handler
+extern exception_page_fault_handler
 
 section .text
 
+%macro PUSH_REGS 0
+    push r15
+    push r14
+    push r13
+    push r12
+    push r11
+    push r10
+    push r9
+    push r8
+    push rbp
+    push rdi
+    push rsi
+    push rdx
+    push rcx
+    push rbx
+    push rax
+%endmacro
+
+%macro POP_REGS 0
+    pop rax
+    pop rbx
+    pop rcx
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rbp
+    pop r8
+    pop r9
+    pop r10
+    pop r11
+    pop r12
+    pop r13
+    pop r14
+    pop r15
+%endmacro
+
 _start:
-    mov dx, 0x3FD
-    mov ecx, 0x10000
-.wait_tx:
-    in al, dx
-    test al, 0x20
-    jnz .send_mark
-    loop .wait_tx
-.send_mark:
+    ; CI breadcrumb: kernel entry reached.
     mov dx, 0x3F8
     mov al, 'X'
     out dx, al
-
-    mov dx, 0x3F8
     mov al, 'Y'
     out dx, al
 
@@ -60,75 +93,38 @@ switch_context:
     ret
 
 isr_timer_stub:
-    push r15
-    push r14
-    push r13
-    push r12
-    push r11
-    push r10
-    push r9
-    push r8
-    push rbp
-    push rdi
-    push rsi
-    push rdx
-    push rcx
-    push rbx
-    push rax
-
+    PUSH_REGS
     mov rdi, rsp
     call irq_timer_handler
+    POP_REGS
+    iretq
 
-    pop rax
-    pop rbx
-    pop rcx
-    pop rdx
-    pop rsi
-    pop rdi
-    pop rbp
-    pop r8
-    pop r9
-    pop r10
-    pop r11
-    pop r12
-    pop r13
-    pop r14
-    pop r15
+isr_keyboard_stub:
+    PUSH_REGS
+    mov rdi, rsp
+    call irq_keyboard_handler
+    POP_REGS
     iretq
 
 isr_syscall_stub:
-    push r15
-    push r14
-    push r13
-    push r12
-    push r11
-    push r10
-    push r9
-    push r8
-    push rbp
-    push rdi
-    push rsi
-    push rdx
-    push rcx
-    push rbx
-    push rax
-
+    PUSH_REGS
     mov rdi, rsp
     call syscall_dispatch
+    POP_REGS
+    iretq
 
-    pop rax
-    pop rbx
-    pop rcx
-    pop rdx
-    pop rsi
-    pop rdi
-    pop rbp
-    pop r8
-    pop r9
-    pop r10
-    pop r11
-    pop r12
-    pop r13
-    pop r14
-    pop r15
+isr_divide_stub:
+    PUSH_REGS
+    mov rdi, rsp
+    call exception_divide_handler
+    POP_REGS
+    iretq
+
+isr_page_fault_stub:
+    PUSH_REGS
+    mov rdi, rsp
+    mov rsi, [rsp + 15 * 8]
+    call exception_page_fault_handler
+    POP_REGS
+    add rsp, 8
     iretq

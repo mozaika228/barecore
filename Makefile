@@ -19,7 +19,7 @@ EFI_LDFLAGS ?= -nostdlib -znocombreloc -T $(EFI_LDS) -shared -Bsymbolic
 EFI_LIBS ?= -L$(EFI_LIBDIR) -lefi -lgnuefi
 OVMF ?= OVMF.fd
 
-.PHONY: all clean run uefi run-uefi ci-smoke verify-kernel-size
+.PHONY: all clean run run-gdb uefi run-uefi ci-smoke ci-runtime verify-kernel-size
 
 all: $(BUILD_DIR)/os.img
 
@@ -81,7 +81,16 @@ $(BUILD_DIR)/os.img: $(BUILD_DIR)/boot.bin $(BUILD_DIR)/stage2.bin $(BUILD_DIR)/
 	dd if=$(BUILD_DIR)/kernel.bin of=$@ bs=512 seek=$$((1 + $(STAGE2_SECTORS))) conv=notrunc
 
 run: $(BUILD_DIR)/os.img
-	qemu-system-x86_64 -drive format=raw,file=$(BUILD_DIR)/os.img -serial stdio -device isa-debug-exit,iobase=0xf4,iosize=0x04
+	qemu-system-x86_64 -nographic -monitor none \
+		-drive format=raw,file=$(BUILD_DIR)/os.img \
+		-serial stdio \
+		-device isa-debug-exit,iobase=0xf4,iosize=0x04
+
+run-gdb: $(BUILD_DIR)/os.img
+	qemu-system-x86_64 -nographic -monitor none -S -s \
+		-drive format=raw,file=$(BUILD_DIR)/os.img \
+		-serial stdio \
+		-device isa-debug-exit,iobase=0xf4,iosize=0x04
 
 run-uefi: uefi
 	qemu-system-x86_64 -bios $(OVMF) -drive format=raw,file=fat:rw:$(BUILD_DIR)/esp -serial stdio -device isa-debug-exit,iobase=0xf4,iosize=0x04
@@ -96,6 +105,19 @@ ci-smoke: $(BUILD_DIR)/os.img
 	status=$$?; \
 	if [ $$status -ne 0 ] && [ $$status -ne 124 ]; then exit $$status; fi
 	grep -q "SLPGJKXYM" $(BUILD_DIR)/qemu.log
+
+ci-runtime: $(BUILD_DIR)/os.img
+	@set +e; \
+	timeout 30s qemu-system-x86_64 -nographic -monitor none -no-reboot -no-shutdown \
+		-drive format=raw,file=$(BUILD_DIR)/os.img \
+		-serial stdio \
+		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+		2>&1 | tee $(BUILD_DIR)/qemu-runtime.log; \
+	status=$$?; \
+	if [ $$status -ne 0 ] && [ $$status -ne 124 ]; then exit $$status; fi
+	grep -q "barecore kernel (professional profile)" $(BUILD_DIR)/qemu-runtime.log
+	grep -q "scheduler: round-robin" $(BUILD_DIR)/qemu-runtime.log
+	grep -q "drivers: PIT + PS/2 keyboard" $(BUILD_DIR)/qemu-runtime.log
 
 clean:
 	rm -rf $(BUILD_DIR)
