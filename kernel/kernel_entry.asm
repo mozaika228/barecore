@@ -124,6 +124,7 @@ switch_context:
 isr_timer_stub:
     PUSH_REGS
     mov rdi, rsp
+    lea rsi, [rsp + 15 * 8]
     call irq_timer_handler
     POP_REGS
     iretq

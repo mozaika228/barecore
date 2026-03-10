@@ -67,6 +67,14 @@ typedef struct {
     uint64_t r15;
 } regs_t;
 
+typedef struct {
+    uint64_t rip;
+    uint64_t cs;
+    uint64_t rflags;
+    uint64_t rsp;
+    uint64_t ss;
+} irq_frame_t;
+
 typedef struct __attribute__((packed)) {
     uint16_t offset_low;
     uint16_t selector;
@@ -134,6 +142,13 @@ typedef struct {
     const char *name;
     void (*entry)(void);
 } task_t;
+
+typedef struct {
+    uint64_t rip;
+    uint64_t rsp;
+    uint64_t rflags;
+    uint8_t active;
+} user_task_t;
 
 typedef struct {
     uint64_t addr;
@@ -221,6 +236,11 @@ static int task_count = 0;
 static int current_task = -1;
 static int next_pid = 1;
 static uint64_t kernel_rsp = 0;
+
+static user_task_t user_tasks[2];
+static int current_user = -1;
+static uint8_t ring3_enabled = 0;
+static uint64_t last_preempt_tick = 0;
 
 static char kbd_ring[256];
 static volatile uint32_t kbd_head = 0;
@@ -920,7 +940,7 @@ static int str_starts_with(const char *s, const char *prefix) {
 }
 
 static void shell_cmd_help(void) {
-    userspace_write("commands: help ls cat echo clear pid sleep lsdisk catdisk fork exec userdemo\n");
+    userspace_write("commands: help ls cat echo clear pid sleep lsdisk catdisk fork exec userdemo userpreempt\n");
 }
 
 static void shell_cmd_ls(void) {
@@ -942,6 +962,8 @@ static void shell_cmd_cat(const char *name) {
 
 static void shell_exec(char *line);
 static void user_demo(void);
+static void user_task_a(void);
+static void user_task_b(void);
 
 static char keyboard_read_blocking(void) {
     for (;;) {
@@ -1007,10 +1029,40 @@ static void task_b(void) {
     userspace_exit();
 }
 
-void irq_timer_handler(regs_t *regs) {
+static void ring3_preempt(irq_frame_t *frame) {
+    if (!ring3_enabled || current_user < 0) {
+        return;
+    }
+    if ((frame->cs & 3) != 3) {
+        return;
+    }
+    if (ticks - last_preempt_tick < 1) {
+        return;
+    }
+    last_preempt_tick = ticks;
+
+    user_task_t *cur = &user_tasks[current_user];
+    cur->rip = frame->rip;
+    cur->rsp = frame->rsp;
+    cur->rflags = frame->rflags;
+
+    int next = (current_user + 1) & 1;
+    if (!user_tasks[next].active) {
+        return;
+    }
+    current_user = next;
+    frame->rip = user_tasks[next].rip;
+    frame->rsp = user_tasks[next].rsp;
+    frame->rflags = user_tasks[next].rflags;
+    frame->cs = 0x23;
+    frame->ss = 0x1B;
+}
+
+void irq_timer_handler(regs_t *regs, irq_frame_t *frame) {
     (void)regs;
     ticks++;
     scheduler_wake_sleepers();
+    ring3_preempt(frame);
     if (apic_enabled) {
         lapic_eoi();
     } else {
@@ -1369,6 +1421,21 @@ static void shell_exec(char *line) {
         enter_user_mode(user_demo, USER_STACK_TOP);
         return;
     }
+    if (str_equal(line, "userpreempt")) {
+        userspace_write("starting ring3 preemptive demo...\n");
+        user_tasks[0].rip = (uint64_t)(uintptr_t)user_task_a;
+        user_tasks[0].rsp = USER_STACK_TOP;
+        user_tasks[0].rflags = 0x202;
+        user_tasks[0].active = 1;
+        user_tasks[1].rip = (uint64_t)(uintptr_t)user_task_b;
+        user_tasks[1].rsp = USER_STACK_TOP - 0x10000;
+        user_tasks[1].rflags = 0x202;
+        user_tasks[1].active = 1;
+        current_user = 0;
+        ring3_enabled = 1;
+        enter_user_mode(user_task_a, user_tasks[0].rsp);
+        return;
+    }
     userspace_write("unknown command\n");
 }
 
@@ -1405,6 +1472,20 @@ static void user_demo(void) {
     user_write("[ring3] demo done\n");
     for (;;) {
         user_sleep(500);
+    }
+}
+
+static void user_task_a(void) {
+    for (;;) {
+        user_write("[ring3] A\n");
+        user_sleep(200);
+    }
+}
+
+static void user_task_b(void) {
+    for (;;) {
+        user_write("[ring3] B\n");
+        user_sleep(250);
     }
 }
 

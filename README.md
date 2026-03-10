@@ -137,6 +137,7 @@ Keyboard-driven shell commands:
 - `fork`
 - `exec <a|b|shell>`
 - `userdemo` (ring3 transition demo)
+- `userpreempt` (ring3 preemptive scheduler demo)
 
 ## Build & Run
 
