@@ -47,6 +47,7 @@
 
 #define LAPIC_DEFAULT_BASE 0xFEE00000u
 #define HPET_DEFAULT_BASE  0xFED00000u
+#define IOAPIC_DEFAULT_BASE 0xFEC00000u
 
 typedef struct {
     uint64_t rax;
@@ -230,6 +231,8 @@ static uint8_t apic_enabled = 0;
 static uint32_t lapic_base = LAPIC_DEFAULT_BASE;
 static uint8_t hpet_enabled = 0;
 static uint64_t hpet_period_fs = 0;
+static uint8_t hpet_irq = 2;
+static uint8_t ioapic_enabled = 0;
 
 static fat_fs_t fat_fs;
 static uint8_t fat_sector[512];
@@ -612,6 +615,70 @@ static void hpet_init(void) {
     *hpet_reg(0xF0) = 0;
     *hpet_reg(0x10) = 1;
     hpet_enabled = (hpet_period_fs != 0);
+}
+
+static volatile uint32_t *ioapic_reg(uint32_t offset) {
+    return (volatile uint32_t *)(uintptr_t)(IOAPIC_DEFAULT_BASE + offset);
+}
+
+static void ioapic_write(uint8_t reg, uint32_t value) {
+    *ioapic_reg(0x00) = reg;
+    *ioapic_reg(0x10) = value;
+}
+
+static uint32_t ioapic_read(uint8_t reg) {
+    *ioapic_reg(0x00) = reg;
+    return *ioapic_reg(0x10);
+}
+
+static void ioapic_init(void) {
+    uint32_t ver = ioapic_read(0x01);
+    uint32_t max_redir = (ver >> 16) & 0xFF;
+    for (uint32_t i = 0; i <= max_redir; ++i) {
+        ioapic_write((uint8_t)(0x10 + i * 2), 0x00010000);
+        ioapic_write((uint8_t)(0x10 + i * 2 + 1), 0x0);
+    }
+    ioapic_enabled = 1;
+}
+
+static void ioapic_set_irq(uint8_t irq, uint8_t vector) {
+    ioapic_write((uint8_t)(0x10 + irq * 2), vector);
+    ioapic_write((uint8_t)(0x10 + irq * 2 + 1), 0x0);
+}
+
+static void hpet_enable_interrupt(void) {
+    if (!hpet_enabled || !ioapic_enabled) {
+        return;
+    }
+    uint64_t conf = *hpet_reg(0x100);
+    conf &= ~(1u << 1);
+    conf &= ~(1u << 2);
+    conf &= ~(0x1Fu << 9);
+    conf |= (uint64_t)(hpet_irq & 0x1F) << 9;
+    conf |= (1u << 2);
+    *hpet_reg(0x100) = conf;
+    ioapic_set_irq(hpet_irq, VECTOR_TIMER);
+}
+
+static void hpet_set_periodic_ms(uint32_t ms) {
+    if (!hpet_enabled) {
+        return;
+    }
+    uint64_t fs_per_tick = hpet_period_fs;
+    if (fs_per_tick == 0) {
+        return;
+    }
+    uint64_t ticks_fs = (uint64_t)ms * 1000000000000ULL;
+    uint64_t hpet_ticks = ticks_fs / fs_per_tick;
+    if (hpet_ticks == 0) {
+        hpet_ticks = 1;
+    }
+    uint64_t conf = *hpet_reg(0x100);
+    conf |= (1u << 3);
+    conf |= (1u << 6);
+    *hpet_reg(0x100) = conf;
+    *hpet_reg(0x108) = hpet_ticks;
+    *hpet_reg(0x108) = hpet_ticks;
 }
 
 static void kbd_ring_push(char c) {
@@ -1353,9 +1420,16 @@ void kmain(const barecore_boot_info_t *boot_info) {
     init_idt();
     lapic_init();
     hpet_init();
-    init_pic(apic_enabled ? 1 : 0);
-    if (!apic_enabled) {
-        init_pit(PIT_HZ);
+    ioapic_init();
+    if (hpet_enabled && ioapic_enabled) {
+        hpet_enable_interrupt();
+        hpet_set_periodic_ms(10);
+        init_pic(1);
+    } else {
+        init_pic(apic_enabled ? 1 : 0);
+        if (!apic_enabled) {
+            init_pit(PIT_HZ);
+        }
     }
 
     fat_init();
@@ -1366,13 +1440,12 @@ void kmain(const barecore_boot_info_t *boot_info) {
 
     write_cstr("scheduler: round-robin\n");
     write_cstr("drivers: ");
-    if (apic_enabled) {
+    if (hpet_enabled && ioapic_enabled) {
+        write_cstr("HPET+IOAPIC timer + PS/2 keyboard");
+    } else if (apic_enabled) {
         write_cstr("APIC timer + PS/2 keyboard");
     } else {
         write_cstr("PIT + PS/2 keyboard");
-    }
-    if (hpet_enabled) {
-        write_cstr(" + HPET");
     }
     write_cstr("\n");
     write_cstr("syscalls: write exit getpid sleep yield\n");

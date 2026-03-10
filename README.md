@@ -79,7 +79,7 @@ BIOS kernel loader constraint:
 ## Kernel Features
 
 ### Interrupts and Exceptions
-- APIC timer (fallback to PIT), HPET detected as high-res time source
+- APIC timer (fallback to PIT), HPET+IOAPIC interrupt path when available
 - PS/2 keyboard IRQ (`IRQ1`)
 - divide-by-zero handler with explicit panic message
 - page-fault handler with fault address (`CR2`) and error code
