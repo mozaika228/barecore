@@ -35,12 +35,15 @@
 #define SYS_GETPID  3
 #define SYS_SLEEP   4
 #define SYS_YIELD   5
+#define SYS_FORK    6
+#define SYS_EXEC    7
 
 #define GDT_KERNEL_CODE 0x08
 #define GDT_KERNEL_DATA 0x10
 #define GDT_USER_DATA   0x18
 #define GDT_USER_CODE   0x20
 #define GDT_TSS         0x28
+#define USER_STACK_TOP  0x00080000u
 
 #define LAPIC_DEFAULT_BASE 0xFEE00000u
 
@@ -127,6 +130,7 @@ typedef struct {
     task_state_t state;
     uint64_t wake_tick;
     const char *name;
+    void (*entry)(void);
 } task_t;
 
 typedef struct {
@@ -187,6 +191,7 @@ extern void idt_load(idtr_t *idtr);
 extern void gdt_load(void *gdtr);
 extern void tss_load(uint16_t selector);
 extern void switch_context(uint64_t *old_rsp_slot, uint64_t *new_rsp_slot);
+extern void enter_user_mode(void (*entry)(void), uint64_t user_stack);
 extern void isr_timer_stub(void);
 extern void isr_keyboard_stub(void);
 extern void isr_syscall_stub(void);
@@ -678,7 +683,40 @@ static int create_task(void (*entry)(void), const char *name) {
     tasks[idx].state = TASK_RUNNABLE;
     tasks[idx].wake_tick = 0;
     tasks[idx].name = name;
+    tasks[idx].entry = entry;
     return idx;
+}
+
+static void task_reset_stack(task_t *t, void (*entry)(void)) {
+    uint64_t *sp = (uint64_t *)(task_stacks[t - tasks] + STACK_SIZE);
+    *--sp = (uint64_t)entry;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+    t->rsp = (uint64_t)sp;
+    t->entry = entry;
+}
+
+static void task_exec_current(void (*entry)(void), const char *name) {
+    if (current_task < 0 || current_task >= task_count) {
+        return;
+    }
+    task_t *t = &tasks[current_task];
+    t->name = name;
+    task_reset_stack(t, entry);
+    __asm__ volatile("mov %0, %%rsp; ret" : : "r"(t->rsp));
+}
+
+static int task_fork_simple(void) {
+    if (current_task < 0 || current_task >= task_count) {
+        return -1;
+    }
+    task_t *parent = &tasks[current_task];
+    int child = create_task(parent->entry, parent->name);
+    return (child < 0) ? -1 : tasks[child].pid;
 }
 
 static int current_pid(void) {
@@ -774,7 +812,7 @@ static int str_starts_with(const char *s, const char *prefix) {
 }
 
 static void shell_cmd_help(void) {
-    userspace_write("commands: help ls cat echo clear pid sleep lsdisk catdisk\n");
+    userspace_write("commands: help ls cat echo clear pid sleep lsdisk catdisk fork exec userdemo\n");
 }
 
 static void shell_cmd_ls(void) {
@@ -795,6 +833,7 @@ static void shell_cmd_cat(const char *name) {
 }
 
 static void shell_exec(char *line);
+static void user_demo(void);
 
 static char keyboard_read_blocking(void) {
     for (;;) {
@@ -1193,7 +1232,68 @@ static void shell_exec(char *line) {
         userspace_write("\n");
         return;
     }
+    if (str_equal(line, "fork")) {
+        int pid = task_fork_simple();
+        userspace_write("fork pid=");
+        write_u64_hex((uint64_t)pid);
+        userspace_write("\n");
+        return;
+    }
+    if (str_starts_with(line, "exec ")) {
+        const char *arg = line + 5;
+        if (str_equal(arg, "a")) {
+            task_exec_current(task_a, "task-a");
+        } else if (str_equal(arg, "b")) {
+            task_exec_current(task_b, "task-b");
+        } else if (str_equal(arg, "shell")) {
+            task_exec_current(task_shell, "shell");
+        } else {
+            userspace_write("exec: unknown target\n");
+        }
+        return;
+    }
+    if (str_equal(line, "userdemo")) {
+        userspace_write("entering ring3 demo...\n");
+        enter_user_mode(user_demo, USER_STACK_TOP);
+        return;
+    }
     userspace_write("unknown command\n");
+}
+
+static inline long user_syscall2(long num, long a0, long a1) {
+    long ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(num), "D"(a0), "S"(a1) : "memory");
+    return ret;
+}
+
+static inline long user_syscall1(long num, long a0) {
+    long ret;
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(num), "D"(a0) : "memory");
+    return ret;
+}
+
+static void user_write(const char *s) {
+    size_t len = 0;
+    while (s[len]) {
+        len++;
+    }
+    (void)user_syscall2(SYS_WRITE, (long)(uintptr_t)s, (long)len);
+}
+
+static void user_sleep(uint64_t ms) {
+    (void)user_syscall1(SYS_SLEEP, (long)ms);
+}
+
+static void user_demo(void) {
+    user_write("[ring3] user demo start\n");
+    for (int i = 0; i < 10; ++i) {
+        user_write("[ring3] tick\n");
+        user_sleep(100);
+    }
+    user_write("[ring3] demo done\n");
+    for (;;) {
+        user_sleep(500);
+    }
 }
 
 void kmain(const barecore_boot_info_t *boot_info) {

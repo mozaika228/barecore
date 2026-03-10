@@ -46,13 +46,13 @@ kernel/kernel.c
 - stage2: minimal 32/64-bit segments for mode transition
 - kernel: full 64-bit GDT with:
   - kernel code/data
-  - user code/data (ring3-ready)
+  - user code/data (ring3)
   - TSS descriptor (RSP0 stack)
 
 ### IDT (configured in `kernel/kernel.c`)
 - `0`: divide-by-zero (`#DE`)
 - `14`: page fault (`#PF`)
-- `32`: timer IRQ0 (APIC or PIT)
+- `32`: timer IRQ0 (APIC or PIT fallback)
 - `33`: PS/2 keyboard IRQ1
 - `0x80`: syscall trap
 
@@ -90,9 +90,11 @@ BIOS kernel loader constraint:
   - `task_a` (prints `A`)
   - `task_b` (prints `B`)
   - `task_shell` (interactive shell)
+- simplified `fork` (spawns a new task from current entry)
+- simplified `exec` (replaces current task entry)
 
 ### Syscalls
-ABI (current):
+ABI (current, ring3 via `int 0x80`):
 - `rax`: syscall number
 - `rdi`, `rsi`: args 0..1
 - return in `rax`
@@ -127,6 +129,9 @@ Keyboard-driven shell commands:
 - `sleep <ms>`
 - `lsdisk`
 - `catdisk <file>`
+- `fork`
+- `exec <a|b|shell>`
+- `userdemo` (ring3 transition demo)
 
 ## Build & Run
 
@@ -211,7 +216,6 @@ make CROSS=x86_64-linux-gnu- ci-runtime
 ## Roadmap
 
 - HPET timer backend
-- ring3 user mode transitions and user scheduler
+- ring3 user scheduler (multi-user tasks)
 - on-disk ext2 reader
-- simplified `fork/exec` process API
 - richer framebuffer text/graphics renderer

@@ -4,6 +4,7 @@ global _start
 global idt_load
 global gdt_load
 global tss_load
+global enter_user_mode
 global switch_context
 global isr_timer_stub
 global isr_keyboard_stub
@@ -82,6 +83,23 @@ tss_load:
     mov ax, di
     ltr ax
     ret
+
+; void enter_user_mode(void (*entry)(void), uint64_t user_stack)
+; rdi = entry, rsi = user_stack
+enter_user_mode:
+    mov ax, 0x1B
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    push qword 0x1B
+    push rsi
+    pushfq
+    or qword [rsp], 0x200
+    push qword 0x23
+    push rdi
+    iretq
 
 ; void switch_context(uint64_t* old_rsp_slot, uint64_t* new_rsp_slot)
 switch_context:
