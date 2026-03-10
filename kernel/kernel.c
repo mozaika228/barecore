@@ -629,6 +629,20 @@ static volatile uint64_t *hpet_reg(uint32_t offset) {
     return (volatile uint64_t *)(uintptr_t)(HPET_DEFAULT_BASE + offset);
 }
 
+static uint8_t hpet_pick_irq(void) {
+    uint64_t conf = *hpet_reg(0x100);
+    uint32_t routes = (uint32_t)(conf >> 32);
+    if (routes == 0) {
+        return hpet_irq;
+    }
+    for (uint8_t i = 0; i < 32; ++i) {
+        if (routes & (1u << i)) {
+            return i;
+        }
+    }
+    return hpet_irq;
+}
+
 static void hpet_init(void) {
     uint64_t cap = *hpet_reg(0x0);
     if (cap == 0 || cap == 0xFFFFFFFFFFFFFFFFULL) {
@@ -640,6 +654,9 @@ static void hpet_init(void) {
     *hpet_reg(0xF0) = 0;
     *hpet_reg(0x10) = 1;
     hpet_enabled = (hpet_period_fs != 0);
+    if (hpet_enabled) {
+        hpet_irq = hpet_pick_irq();
+    }
 }
 
 static volatile uint32_t *ioapic_reg(uint32_t offset) {
@@ -699,10 +716,14 @@ static void hpet_set_periodic_ms(uint32_t ms) {
         hpet_ticks = 1;
     }
     uint64_t conf = *hpet_reg(0x100);
+    if ((conf & (1u << 4)) == 0) {
+        return;
+    }
     conf |= (1u << 3);
     conf |= (1u << 6);
     *hpet_reg(0x100) = conf;
-    *hpet_reg(0x108) = hpet_ticks;
+    uint64_t now = *hpet_reg(0xF0);
+    *hpet_reg(0x108) = now + hpet_ticks;
     *hpet_reg(0x108) = hpet_ticks;
 }
 
