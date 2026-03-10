@@ -145,11 +145,15 @@ protected_mode:
     mov dword [PD_BASE + 0], 0x00000087
     mov dword [PD_BASE + 4], 0x00000000
 
-    ; Map LAPIC MMIO (0xFEE00000) via PDPT[3] -> PD_APIC.
+    ; Map LAPIC/HPET MMIO (0xFEE00000/0xFED00000) via PDPT[3] -> PD_APIC.
     mov dword [PDPT_BASE + (3 * 8) + 0], PD_APIC_BASE | 0x003
     mov dword [PDPT_BASE + (3 * 8) + 4], 0x00000000
 
-    ; PD index for 0xFEE00000 is 0x1F7.
+    ; PD index for 0xFED00000 is 0x1F6 (HPET).
+    mov dword [PD_APIC_BASE + (0x1F6 * 8) + 0], 0xFED00000 | 0x083
+    mov dword [PD_APIC_BASE + (0x1F6 * 8) + 4], 0x00000000
+
+    ; PD index for 0xFEE00000 is 0x1F7 (LAPIC).
     mov dword [PD_APIC_BASE + (0x1F7 * 8) + 0], 0xFEE00000 | 0x083
     mov dword [PD_APIC_BASE + (0x1F7 * 8) + 4], 0x00000000
 

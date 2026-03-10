@@ -65,6 +65,8 @@ Key regions (BIOS path):
 - `0x00091000`: PDPT
 - `0x00092000`: PD (identity map)
 - `0x00093000`: PD for LAPIC mapping
+- `0xFED00000`: HPET MMIO (mapped)
+- `0xFEE00000`: LAPIC MMIO (mapped)
 - `0x00100000`: kernel image load address
 - `0x00200000`: kernel bootstrap stack top
 - `0x000B8000`: VGA text buffer (BIOS console fallback)
@@ -77,7 +79,7 @@ BIOS kernel loader constraint:
 ## Kernel Features
 
 ### Interrupts and Exceptions
-- APIC timer (fallback to PIT)
+- APIC timer (fallback to PIT), HPET detected as high-res time source
 - PS/2 keyboard IRQ (`IRQ1`)
 - divide-by-zero handler with explicit panic message
 - page-fault handler with fault address (`CR2`) and error code
@@ -105,6 +107,8 @@ Implemented syscalls:
 - `getpid`
 - `sleep`
 - `yield`
+- `fork` (simplified)
+- `exec` (simplified)
 
 ### Console and Graphics
 - serial output (`COM1`) for debugging/CI

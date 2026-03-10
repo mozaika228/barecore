@@ -46,6 +46,7 @@
 #define USER_STACK_TOP  0x00080000u
 
 #define LAPIC_DEFAULT_BASE 0xFEE00000u
+#define HPET_DEFAULT_BASE  0xFED00000u
 
 typedef struct {
     uint64_t rax;
@@ -227,6 +228,8 @@ static uint8_t kbd_shift = 0;
 
 static uint8_t apic_enabled = 0;
 static uint32_t lapic_base = LAPIC_DEFAULT_BASE;
+static uint8_t hpet_enabled = 0;
+static uint64_t hpet_period_fs = 0;
 
 static fat_fs_t fat_fs;
 static uint8_t fat_sector[512];
@@ -571,6 +574,23 @@ static void lapic_init(void) {
 
 static void lapic_eoi(void) {
     lapic_write(0xB0, 0);
+}
+
+static volatile uint64_t *hpet_reg(uint32_t offset) {
+    return (volatile uint64_t *)(uintptr_t)(HPET_DEFAULT_BASE + offset);
+}
+
+static void hpet_init(void) {
+    uint64_t cap = *hpet_reg(0x0);
+    if (cap == 0 || cap == 0xFFFFFFFFFFFFFFFFULL) {
+        hpet_enabled = 0;
+        return;
+    }
+    hpet_period_fs = cap >> 32;
+    *hpet_reg(0x10) = 0;
+    *hpet_reg(0xF0) = 0;
+    *hpet_reg(0x10) = 1;
+    hpet_enabled = (hpet_period_fs != 0);
 }
 
 static void kbd_ring_push(char c) {
@@ -1307,6 +1327,7 @@ void kmain(const barecore_boot_info_t *boot_info) {
 
     init_idt();
     lapic_init();
+    hpet_init();
     init_pic(apic_enabled ? 1 : 0);
     if (!apic_enabled) {
         init_pit(PIT_HZ);
@@ -1320,7 +1341,15 @@ void kmain(const barecore_boot_info_t *boot_info) {
 
     write_cstr("scheduler: round-robin\n");
     write_cstr("drivers: ");
-    write_cstr(apic_enabled ? "APIC timer + PS/2 keyboard\n" : "PIT + PS/2 keyboard\n");
+    if (apic_enabled) {
+        write_cstr("APIC timer + PS/2 keyboard");
+    } else {
+        write_cstr("PIT + PS/2 keyboard");
+    }
+    if (hpet_enabled) {
+        write_cstr(" + HPET");
+    }
+    write_cstr("\n");
     write_cstr("syscalls: write exit getpid sleep yield\n");
 
     cpu_sti();
