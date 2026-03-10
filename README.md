@@ -83,6 +83,7 @@ BIOS kernel loader constraint:
 - PS/2 keyboard IRQ (`IRQ1`)
 - divide-by-zero handler with explicit panic message
 - page-fault handler with fault address (`CR2`) and error code
+- register dump + simple backtrace on exceptions
 
 ### Scheduler and Processes
 - context switch in ASM (`switch_context`)

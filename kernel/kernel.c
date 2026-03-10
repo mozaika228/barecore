@@ -395,6 +395,27 @@ static void write_u64_hex(uint64_t value) {
     }
 }
 
+static void dump_regs(const regs_t *r) {
+    write_cstr("RAX="); write_u64_hex(r->rax); write_cstr(" RBX="); write_u64_hex(r->rbx); write_cstr("\n");
+    write_cstr("RCX="); write_u64_hex(r->rcx); write_cstr(" RDX="); write_u64_hex(r->rdx); write_cstr("\n");
+    write_cstr("RSI="); write_u64_hex(r->rsi); write_cstr(" RDI="); write_u64_hex(r->rdi); write_cstr("\n");
+    write_cstr("RBP="); write_u64_hex(r->rbp); write_cstr(" RSP=?\n");
+    write_cstr("R8 ="); write_u64_hex(r->r8);  write_cstr(" R9 ="); write_u64_hex(r->r9);  write_cstr("\n");
+    write_cstr("R10="); write_u64_hex(r->r10); write_cstr(" R11="); write_u64_hex(r->r11); write_cstr("\n");
+    write_cstr("R12="); write_u64_hex(r->r12); write_cstr(" R13="); write_u64_hex(r->r13); write_cstr("\n");
+    write_cstr("R14="); write_u64_hex(r->r14); write_cstr(" R15="); write_u64_hex(r->r15); write_cstr("\n");
+}
+
+static void dump_backtrace(uint64_t rbp) {
+    write_cstr("Backtrace:\n");
+    for (int i = 0; i < 8 && rbp; ++i) {
+        uint64_t *frame = (uint64_t *)rbp;
+        uint64_t ret = frame[1];
+        write_cstr("  "); write_u64_hex(ret); write_cstr("\n");
+        rbp = frame[0];
+    }
+}
+
 static void clear_console(void) {
     if (fb.enabled) {
         fb_fill_rect(0, 0, fb.width, fb.height, rgb_to_pixel(fb.bg, fb.format));
@@ -951,6 +972,8 @@ void irq_keyboard_handler(regs_t *regs) {
 void exception_divide_handler(regs_t *regs) {
     (void)regs;
     write_cstr("\n\n=== EXCEPTION: DIVIDE BY ZERO (#DE) ===\n");
+    dump_regs(regs);
+    dump_backtrace(regs->rbp);
     write_cstr("Kernel halted for safety.\n");
     cpu_cli();
     for (;;) {
@@ -969,6 +992,8 @@ void exception_page_fault_handler(regs_t *regs, uint64_t error_code) {
     write_cstr(" error_code=");
     write_u64_hex(error_code);
     write_cstr("\nKernel halted for safety.\n");
+    dump_regs(regs);
+    dump_backtrace(regs->rbp);
     cpu_cli();
     for (;;) {
         cpu_halt();
