@@ -5,6 +5,8 @@
 
 #define IDT_ENTRIES 256
 #define MAX_TASKS 8
+#define MAX_USER_TASKS 4
+#define USER_STACK_SIZE 4096
 #define STACK_SIZE 4096
 
 #define PIT_HZ 100
@@ -148,6 +150,7 @@ typedef struct {
     uint64_t rsp;
     uint64_t rflags;
     uint8_t active;
+    uint8_t pid;
 } user_task_t;
 
 typedef struct {
@@ -237,10 +240,12 @@ static int current_task = -1;
 static int next_pid = 1;
 static uint64_t kernel_rsp = 0;
 
-static user_task_t user_tasks[2];
+static user_task_t user_tasks[MAX_USER_TASKS];
 static int current_user = -1;
 static uint8_t ring3_enabled = 0;
 static uint64_t last_preempt_tick = 0;
+static uint8_t user_need_resched = 0;
+static uint8_t user_task_stacks[MAX_USER_TASKS][USER_STACK_SIZE];
 
 static char kbd_ring[256];
 static volatile uint32_t kbd_head = 0;
@@ -964,6 +969,8 @@ static void shell_exec(char *line);
 static void user_demo(void);
 static void user_task_a(void);
 static void user_task_b(void);
+static void user_task_c(void);
+static void user_task_d(void);
 
 static char keyboard_read_blocking(void) {
     for (;;) {
@@ -1029,6 +1036,29 @@ static void task_b(void) {
     userspace_exit();
 }
 
+static int create_user_task(int slot, void (*entry)(void)) {
+    if (slot < 0 || slot >= MAX_USER_TASKS) {
+        return -1;
+    }
+    user_tasks[slot].rip = (uint64_t)(uintptr_t)entry;
+    user_tasks[slot].rsp = (uint64_t)(uintptr_t)&user_task_stacks[slot][USER_STACK_SIZE];
+    user_tasks[slot].rflags = 0x202;
+    user_tasks[slot].active = 1;
+    user_tasks[slot].pid = (uint8_t)(slot + 1);
+    return user_tasks[slot].pid;
+}
+
+static int pick_next_user(int current) {
+    int next = current;
+    for (int i = 0; i < MAX_USER_TASKS; ++i) {
+        next = (next + 1) % MAX_USER_TASKS;
+        if (user_tasks[next].active) {
+            return next;
+        }
+    }
+    return -1;
+}
+
 static void ring3_preempt(irq_frame_t *frame) {
     if (!ring3_enabled || current_user < 0) {
         return;
@@ -1036,18 +1066,19 @@ static void ring3_preempt(irq_frame_t *frame) {
     if ((frame->cs & 3) != 3) {
         return;
     }
-    if (ticks - last_preempt_tick < 1) {
+    if (!user_need_resched && (ticks - last_preempt_tick < 1)) {
         return;
     }
     last_preempt_tick = ticks;
+    user_need_resched = 0;
 
     user_task_t *cur = &user_tasks[current_user];
     cur->rip = frame->rip;
     cur->rsp = frame->rsp;
     cur->rflags = frame->rflags;
 
-    int next = (current_user + 1) & 1;
-    if (!user_tasks[next].active) {
+    int next = pick_next_user(current_user);
+    if (next < 0 || next == current_user) {
         return;
     }
     current_user = next;
@@ -1145,6 +1176,9 @@ void syscall_dispatch(regs_t *regs) {
         regs->rax = 0;
         break;
     case SYS_YIELD:
+        if (ring3_enabled && current_user >= 0) {
+            user_need_resched = 1;
+        }
         regs->rax = 0;
         break;
     default:
@@ -1423,16 +1457,16 @@ static void shell_exec(char *line) {
     }
     if (str_equal(line, "userpreempt")) {
         userspace_write("starting ring3 preemptive demo...\n");
-        user_tasks[0].rip = (uint64_t)(uintptr_t)user_task_a;
-        user_tasks[0].rsp = USER_STACK_TOP;
-        user_tasks[0].rflags = 0x202;
-        user_tasks[0].active = 1;
-        user_tasks[1].rip = (uint64_t)(uintptr_t)user_task_b;
-        user_tasks[1].rsp = USER_STACK_TOP - 0x10000;
-        user_tasks[1].rflags = 0x202;
-        user_tasks[1].active = 1;
+        for (int i = 0; i < MAX_USER_TASKS; ++i) {
+            user_tasks[i].active = 0;
+        }
+        create_user_task(0, user_task_a);
+        create_user_task(1, user_task_b);
+        create_user_task(2, user_task_c);
+        create_user_task(3, user_task_d);
         current_user = 0;
         ring3_enabled = 1;
+        user_need_resched = 0;
         enter_user_mode(user_task_a, user_tasks[0].rsp);
         return;
     }
@@ -1486,6 +1520,20 @@ static void user_task_b(void) {
     for (;;) {
         user_write("[ring3] B\n");
         user_sleep(250);
+    }
+}
+
+static void user_task_c(void) {
+    for (;;) {
+        user_write("[ring3] C\n");
+        user_sleep(300);
+    }
+}
+
+static void user_task_d(void) {
+    for (;;) {
+        user_write("[ring3] D\n");
+        user_sleep(350);
     }
 }
 
