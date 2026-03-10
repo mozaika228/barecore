@@ -2,7 +2,7 @@
 [org 0x8000]
 
 KERNEL_LBA      equ 9
-KERNEL_SECTORS  equ 64
+KERNEL_SECTORS  equ 128
 KERNEL_SEGMENT  equ 0x1000
 KERNEL_OFFSET   equ 0x0000
 KERNEL_DEST     equ 0x00100000
@@ -15,6 +15,7 @@ DATA64_SEL      equ 0x20
 PML4_BASE       equ 0x00090000
 PDPT_BASE       equ 0x00091000
 PD_BASE         equ 0x00092000
+PD_APIC_BASE    equ 0x00093000
 
 stage2_start:
     cli
@@ -140,8 +141,17 @@ protected_mode:
     mov dword [PDPT_BASE + 0], PD_BASE | 0x003
     mov dword [PDPT_BASE + 4], 0x00000000
 
-    mov dword [PD_BASE + 0], 0x00000083
+    ; Identity-map 0..2 MiB, user-accessible (for minimal ring3 demo).
+    mov dword [PD_BASE + 0], 0x00000087
     mov dword [PD_BASE + 4], 0x00000000
+
+    ; Map LAPIC MMIO (0xFEE00000) via PDPT[3] -> PD_APIC.
+    mov dword [PDPT_BASE + (3 * 8) + 0], PD_APIC_BASE | 0x003
+    mov dword [PDPT_BASE + (3 * 8) + 4], 0x00000000
+
+    ; PD index for 0xFEE00000 is 0x1F7.
+    mov dword [PD_APIC_BASE + (0x1F7 * 8) + 0], 0xFEE00000 | 0x083
+    mov dword [PD_APIC_BASE + (0x1F7 * 8) + 4], 0x00000000
 
     mov eax, PML4_BASE
     mov cr3, eax

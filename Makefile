@@ -8,7 +8,7 @@ EFI_OBJCOPY ?= objcopy
 
 BUILD_DIR := build
 STAGE2_SECTORS := 8
-KERNEL_SECTORS := 64
+KERNEL_SECTORS := 128
 
 CFLAGS := -ffreestanding -fno-pic -fno-stack-protector -m64 -mcmodel=kernel -mno-red-zone -O2 -Wall -Wextra
 EFI_CFLAGS ?= -fpic -fshort-wchar -mno-red-zone -Wall -Wextra -I/usr/include/efi -I/usr/include/efi/x86_64
@@ -115,7 +115,7 @@ ci-runtime: $(BUILD_DIR)/os.img
 		2>&1 | tee $(BUILD_DIR)/qemu-runtime.log; \
 	status=$$?; \
 	if [ $$status -ne 0 ] && [ $$status -ne 124 ]; then exit $$status; fi
-	grep -q "barecore kernel (professional profile)" $(BUILD_DIR)/qemu-runtime.log
+	grep -q "barecore kernel (production path)" $(BUILD_DIR)/qemu-runtime.log
 	grep -q "scheduler: round-robin" $(BUILD_DIR)/qemu-runtime.log
 	grep -q "drivers: PIT + PS/2 keyboard" $(BUILD_DIR)/qemu-runtime.log
 

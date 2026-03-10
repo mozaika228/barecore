@@ -2,6 +2,8 @@
 
 global _start
 global idt_load
+global gdt_load
+global tss_load
 global switch_context
 global isr_timer_stub
 global isr_keyboard_stub
@@ -70,6 +72,15 @@ _start:
 
 idt_load:
     lidt [rdi]
+    ret
+
+gdt_load:
+    lgdt [rdi]
+    ret
+
+tss_load:
+    mov ax, di
+    ltr ax
     ret
 
 ; void switch_context(uint64_t* old_rsp_slot, uint64_t* new_rsp_slot)

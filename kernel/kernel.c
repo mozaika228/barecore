@@ -36,6 +36,14 @@
 #define SYS_SLEEP   4
 #define SYS_YIELD   5
 
+#define GDT_KERNEL_CODE 0x08
+#define GDT_KERNEL_DATA 0x10
+#define GDT_USER_DATA   0x18
+#define GDT_USER_CODE   0x20
+#define GDT_TSS         0x28
+
+#define LAPIC_DEFAULT_BASE 0xFEE00000u
+
 typedef struct {
     uint64_t rax;
     uint64_t rbx;
@@ -68,6 +76,44 @@ typedef struct __attribute__((packed)) {
     uint16_t limit;
     uint64_t base;
 } idtr_t;
+
+typedef struct __attribute__((packed)) {
+    uint16_t limit;
+    uint16_t base_low;
+    uint8_t base_mid;
+    uint8_t access;
+    uint8_t gran;
+    uint8_t base_high;
+} gdt_entry_t;
+
+typedef struct __attribute__((packed)) {
+    uint16_t limit;
+    uint16_t base_low;
+    uint8_t base_mid;
+    uint8_t access;
+    uint8_t gran;
+    uint8_t base_high;
+    uint32_t base_upper;
+    uint32_t reserved;
+} gdt_tss_entry_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t reserved0;
+    uint64_t rsp0;
+    uint64_t rsp1;
+    uint64_t rsp2;
+    uint64_t reserved1;
+    uint64_t ist1;
+    uint64_t ist2;
+    uint64_t ist3;
+    uint64_t ist4;
+    uint64_t ist5;
+    uint64_t ist6;
+    uint64_t ist7;
+    uint64_t reserved2;
+    uint16_t reserved3;
+    uint16_t iopb_offset;
+} tss_t;
 
 typedef enum {
     TASK_RUNNABLE = 0,
@@ -102,7 +148,44 @@ typedef struct {
     const char *data;
 } initrd_file_t;
 
+typedef struct __attribute__((packed)) {
+    uint8_t jmp[3];
+    uint8_t oem[8];
+    uint16_t bytes_per_sector;
+    uint8_t sectors_per_cluster;
+    uint16_t reserved_sectors;
+    uint8_t num_fats;
+    uint16_t root_entries;
+    uint16_t total_sectors16;
+    uint8_t media;
+    uint16_t sectors_per_fat16;
+    uint16_t sectors_per_track;
+    uint16_t num_heads;
+    uint32_t hidden_sectors;
+    uint32_t total_sectors32;
+    uint8_t drive_number;
+    uint8_t reserved;
+    uint8_t boot_sig;
+    uint32_t volume_id;
+    uint8_t volume_label[11];
+    uint8_t fs_type[8];
+} fat_bpb_t;
+
+typedef struct {
+    fat_bpb_t bpb;
+    uint32_t fat_start_lba;
+    uint32_t root_start_lba;
+    uint32_t data_start_lba;
+    uint32_t root_dir_sectors;
+    uint32_t total_sectors;
+    uint32_t total_clusters;
+    uint8_t fat_type; /* 12 or 16 */
+    uint8_t valid;
+} fat_fs_t;
+
 extern void idt_load(idtr_t *idtr);
+extern void gdt_load(void *gdtr);
+extern void tss_load(uint16_t selector);
 extern void switch_context(uint64_t *old_rsp_slot, uint64_t *new_rsp_slot);
 extern void isr_timer_stub(void);
 extern void isr_keyboard_stub(void);
@@ -112,6 +195,12 @@ extern void isr_page_fault_stub(void);
 
 static idt_gate_t idt[IDT_ENTRIES];
 static idtr_t idtr;
+
+static struct {
+    gdt_entry_t entries[5];
+    gdt_tss_entry_t tss;
+} gdt_blob;
+static tss_t tss;
 
 static volatile uint16_t *const vga = (volatile uint16_t *)0xB8000;
 static uint16_t vga_pos = 0;
@@ -131,10 +220,17 @@ static volatile uint32_t kbd_head = 0;
 static volatile uint32_t kbd_tail = 0;
 static uint8_t kbd_shift = 0;
 
+static uint8_t apic_enabled = 0;
+static uint32_t lapic_base = LAPIC_DEFAULT_BASE;
+
+static fat_fs_t fat_fs;
+static uint8_t fat_sector[512];
+static uint8_t file_buffer[4096];
+
 static const initrd_file_t initrd_files[] = {
     {"README.TXT", "barecore initrd\n"},
     {"MOTD.TXT", "Welcome to barecore shell\n"},
-    {"SYSINFO.TXT", "Kernel: x86_64, scheduler: round-robin, timer: PIT\n"},
+    {"SYSINFO.TXT", "Kernel: x86_64, scheduler: round-robin, timer: APIC/PIT\n"},
 };
 
 static inline void outb(uint16_t port, uint8_t value) {
@@ -144,6 +240,12 @@ static inline void outb(uint16_t port, uint8_t value) {
 static inline uint8_t inb(uint16_t port) {
     uint8_t value;
     __asm__ volatile("inb %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+
+static inline uint16_t inw(uint16_t port) {
+    uint16_t value;
+    __asm__ volatile("inw %1, %0" : "=a"(value) : "Nd"(port));
     return value;
 }
 
@@ -161,6 +263,18 @@ static inline void cpu_sti(void) {
 
 static inline void cpu_cli(void) {
     __asm__ volatile("cli");
+}
+
+static inline void rdmsr(uint32_t msr, uint32_t *lo, uint32_t *hi) {
+    __asm__ volatile("rdmsr" : "=a"(*lo), "=d"(*hi) : "c"(msr));
+}
+
+static inline void wrmsr(uint32_t msr, uint32_t lo, uint32_t hi) {
+    __asm__ volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
+}
+
+static inline void cpuid(uint32_t leaf, uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d) {
+    __asm__ volatile("cpuid" : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d) : "a"(leaf));
 }
 
 static inline uint32_t rgb_to_pixel(uint32_t rgb, uint32_t format) {
@@ -305,10 +419,63 @@ static void init_console(const barecore_boot_info_t *bi) {
     }
 }
 
+static void gdt_set_entry(gdt_entry_t *e, uint32_t base, uint32_t limit, uint8_t access, uint8_t gran) {
+    e->limit = (uint16_t)(limit & 0xFFFF);
+    e->base_low = (uint16_t)(base & 0xFFFF);
+    e->base_mid = (uint8_t)((base >> 16) & 0xFF);
+    e->access = access;
+    e->gran = (uint8_t)(((limit >> 16) & 0x0F) | (gran & 0xF0));
+    e->base_high = (uint8_t)((base >> 24) & 0xFF);
+}
+
+static void gdt_set_tss(gdt_tss_entry_t *e, uint64_t base, uint32_t limit) {
+    e->limit = (uint16_t)(limit & 0xFFFF);
+    e->base_low = (uint16_t)(base & 0xFFFF);
+    e->base_mid = (uint8_t)((base >> 16) & 0xFF);
+    e->access = 0x89;
+    e->gran = (uint8_t)(((limit >> 16) & 0x0F));
+    e->base_high = (uint8_t)((base >> 24) & 0xFF);
+    e->base_upper = (uint32_t)((base >> 32) & 0xFFFFFFFF);
+    e->reserved = 0;
+}
+
+static void init_gdt_tss(void) {
+    gdt_set_entry(&gdt_blob.entries[0], 0, 0, 0, 0);
+    gdt_set_entry(&gdt_blob.entries[1], 0, 0xFFFFF, 0x9A, 0xA0);
+    gdt_set_entry(&gdt_blob.entries[2], 0, 0xFFFFF, 0x92, 0xA0);
+    gdt_set_entry(&gdt_blob.entries[3], 0, 0xFFFFF, 0xF2, 0xA0);
+    gdt_set_entry(&gdt_blob.entries[4], 0, 0xFFFFF, 0xFA, 0xA0);
+
+    tss = (tss_t){0};
+    tss.rsp0 = 0x00200000;
+    tss.iopb_offset = sizeof(tss_t);
+
+    gdt_set_tss(&gdt_blob.tss, (uint64_t)&tss, sizeof(tss_t) - 1);
+
+    struct {
+        uint16_t limit;
+        uint64_t base;
+    } __attribute__((packed)) gdtr = {
+        .limit = (uint16_t)(sizeof(gdt_blob) - 1),
+        .base = (uint64_t)&gdt_blob,
+    };
+
+    gdt_load(&gdtr);
+    tss_load(GDT_TSS);
+
+    __asm__ volatile(
+        "mov %0, %%ds\n\t"
+        "mov %0, %%es\n\t"
+        "mov %0, %%ss\n\t"
+        :
+        : "r"((uint16_t)GDT_KERNEL_DATA)
+        : "memory");
+}
+
 static void idt_set_gate(uint8_t vector, void (*handler)(void), uint8_t flags) {
     uint64_t addr = (uint64_t)handler;
     idt[vector].offset_low = (uint16_t)(addr & 0xFFFF);
-    idt[vector].selector = 0x08;
+    idt[vector].selector = GDT_KERNEL_CODE;
     idt[vector].ist = 0;
     idt[vector].type_attr = flags;
     idt[vector].offset_mid = (uint16_t)((addr >> 16) & 0xFFFF);
@@ -324,14 +491,14 @@ static void init_idt(void) {
     idt_set_gate(VECTOR_PAGE_FAULT, isr_page_fault_stub, 0x8E);
     idt_set_gate(VECTOR_TIMER, isr_timer_stub, 0x8E);
     idt_set_gate(VECTOR_KEYBOARD, isr_keyboard_stub, 0x8E);
-    idt_set_gate(VECTOR_SYSCALL, isr_syscall_stub, 0x8E);
+    idt_set_gate(VECTOR_SYSCALL, isr_syscall_stub, 0xEE);
 
     idtr.limit = (uint16_t)(sizeof(idt) - 1);
     idtr.base = (uint64_t)&idt[0];
     idt_load(&idtr);
 }
 
-static void init_pic(void) {
+static void init_pic(uint8_t mask_timer) {
     outb(PIC1_COMMAND, 0x11);
     io_wait();
     outb(PIC2_COMMAND, 0x11);
@@ -352,7 +519,7 @@ static void init_pic(void) {
     outb(PIC2_DATA, 0x01);
     io_wait();
 
-    outb(PIC1_DATA, 0xFC); /* unmask IRQ0(timer), IRQ1(keyboard) */
+    outb(PIC1_DATA, mask_timer ? 0xFD : 0xFC);
     outb(PIC2_DATA, 0xFF);
 }
 
@@ -361,6 +528,44 @@ static void init_pit(uint32_t hz) {
     outb(PIT_COMMAND, 0x36);
     outb(PIT_CHANNEL0, (uint8_t)(divisor & 0xFF));
     outb(PIT_CHANNEL0, (uint8_t)((divisor >> 8) & 0xFF));
+}
+
+static volatile uint32_t *lapic_reg(uint32_t offset) {
+    return (volatile uint32_t *)(uintptr_t)(lapic_base + offset);
+}
+
+static void lapic_write(uint32_t offset, uint32_t value) {
+    *lapic_reg(offset) = value;
+    (void)*lapic_reg(0x20);
+}
+
+static void lapic_init(void) {
+    uint32_t a, b, c, d;
+    cpuid(1, &a, &b, &c, &d);
+    if ((d & (1u << 9)) == 0) {
+        apic_enabled = 0;
+        return;
+    }
+
+    uint32_t lo, hi;
+    rdmsr(0x1B, &lo, &hi);
+    lo |= (1u << 11);
+    wrmsr(0x1B, lo, hi);
+
+    lapic_base = (lo & 0xFFFFF000u);
+    if (lapic_base == 0) {
+        lapic_base = LAPIC_DEFAULT_BASE;
+    }
+
+    lapic_write(0xF0, 0x1FF);
+    lapic_write(0x3E0, 0x3);
+    lapic_write(0x320, VECTOR_TIMER | (1u << 17));
+    lapic_write(0x380, 0x100000);
+    apic_enabled = 1;
+}
+
+static void lapic_eoi(void) {
+    lapic_write(0xB0, 0);
 }
 
 static void kbd_ring_push(char c) {
@@ -460,13 +665,13 @@ static int create_task(void (*entry)(void), const char *name) {
     int idx = task_count++;
     uint64_t *sp = (uint64_t *)(task_stacks[idx] + STACK_SIZE);
 
-    *--sp = (uint64_t)entry; /* return RIP for switch_context -> ret */
-    *--sp = 0;               /* rbp */
-    *--sp = 0;               /* rbx */
-    *--sp = 0;               /* r12 */
-    *--sp = 0;               /* r13 */
-    *--sp = 0;               /* r14 */
-    *--sp = 0;               /* r15 */
+    *--sp = (uint64_t)entry;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
+    *--sp = 0;
 
     tasks[idx].pid = next_pid++;
     tasks[idx].rsp = (uint64_t)sp;
@@ -569,7 +774,7 @@ static int str_starts_with(const char *s, const char *prefix) {
 }
 
 static void shell_cmd_help(void) {
-    userspace_write("commands: help ls cat echo clear pid sleep\n");
+    userspace_write("commands: help ls cat echo clear pid sleep lsdisk catdisk\n");
 }
 
 static void shell_cmd_ls(void) {
@@ -589,49 +794,7 @@ static void shell_cmd_cat(const char *name) {
     userspace_write("cat: not found\n");
 }
 
-static void shell_exec(char *line) {
-    if (line[0] == 0) {
-        return;
-    }
-    if (str_equal(line, "help")) {
-        shell_cmd_help();
-        return;
-    }
-    if (str_equal(line, "ls")) {
-        shell_cmd_ls();
-        return;
-    }
-    if (str_equal(line, "clear")) {
-        clear_console();
-        return;
-    }
-    if (str_equal(line, "pid")) {
-        userspace_write("pid=");
-        write_u64_hex((uint64_t)userspace_getpid());
-        userspace_write("\n");
-        return;
-    }
-    if (str_starts_with(line, "sleep ")) {
-        uint64_t ms = 0;
-        const char *p = line + 6;
-        while (*p >= '0' && *p <= '9') {
-            ms = ms * 10 + (uint64_t)(*p - '0');
-            p++;
-        }
-        userspace_sleep(ms);
-        return;
-    }
-    if (str_starts_with(line, "cat ")) {
-        shell_cmd_cat(line + 4);
-        return;
-    }
-    if (str_starts_with(line, "echo ")) {
-        userspace_write(line + 5);
-        userspace_write("\n");
-        return;
-    }
-    userspace_write("unknown command\n");
-}
+static void shell_exec(char *line);
 
 static char keyboard_read_blocking(void) {
     for (;;) {
@@ -701,7 +864,11 @@ void irq_timer_handler(regs_t *regs) {
     (void)regs;
     ticks++;
     scheduler_wake_sleepers();
-    outb(PIC1_COMMAND, PIC_EOI);
+    if (apic_enabled) {
+        lapic_eoi();
+    } else {
+        outb(PIC1_COMMAND, PIC_EOI);
+    }
 }
 
 void irq_keyboard_handler(regs_t *regs) {
@@ -783,24 +950,277 @@ void syscall_dispatch(regs_t *regs) {
     }
 }
 
-void kmain(const barecore_boot_info_t *boot_info) {
-    serial_put_char('M'); /* CI breadcrumb: entered kmain */
+static void ata_wait_bsy(void) {
+    while (inb(0x1F7) & 0x80) {
+    }
+}
 
+static int ata_wait_drq(void) {
+    for (int i = 0; i < 100000; ++i) {
+        uint8_t s = inb(0x1F7);
+        if (s & 0x08) {
+            return 1;
+        }
+        if (s & 0x01) {
+            return 0;
+        }
+    }
+    return 0;
+}
+
+static int ata_read_sector(uint32_t lba, uint8_t *buf) {
+    ata_wait_bsy();
+    outb(0x1F2, 1);
+    outb(0x1F3, (uint8_t)(lba & 0xFF));
+    outb(0x1F4, (uint8_t)((lba >> 8) & 0xFF));
+    outb(0x1F5, (uint8_t)((lba >> 16) & 0xFF));
+    outb(0x1F6, 0xE0 | ((lba >> 24) & 0x0F));
+    outb(0x1F7, 0x20);
+    if (!ata_wait_drq()) {
+        return 0;
+    }
+    for (int i = 0; i < 256; ++i) {
+        uint16_t w = inw(0x1F0);
+        buf[i * 2] = (uint8_t)(w & 0xFF);
+        buf[i * 2 + 1] = (uint8_t)(w >> 8);
+    }
+    return 1;
+}
+
+static void fat_init(void) {
+    fat_fs.valid = 0;
+    if (!ata_read_sector(0, fat_sector)) {
+        return;
+    }
+    fat_bpb_t *bpb = (fat_bpb_t *)fat_sector;
+    if (bpb->bytes_per_sector != 512) {
+        return;
+    }
+
+    fat_fs.bpb = *bpb;
+    fat_fs.total_sectors = bpb->total_sectors16 ? bpb->total_sectors16 : bpb->total_sectors32;
+    fat_fs.fat_start_lba = bpb->reserved_sectors;
+    fat_fs.root_dir_sectors = ((bpb->root_entries * 32) + 511) / 512;
+    fat_fs.root_start_lba = fat_fs.fat_start_lba + (bpb->num_fats * bpb->sectors_per_fat16);
+    fat_fs.data_start_lba = fat_fs.root_start_lba + fat_fs.root_dir_sectors;
+
+    uint32_t data_sectors = fat_fs.total_sectors - (bpb->reserved_sectors + (bpb->num_fats * bpb->sectors_per_fat16) + fat_fs.root_dir_sectors);
+    fat_fs.total_clusters = data_sectors / bpb->sectors_per_cluster;
+    fat_fs.fat_type = (fat_fs.total_clusters < 4085) ? 12 : 16;
+    fat_fs.valid = 1;
+}
+
+static uint32_t fat_cluster_to_lba(uint32_t cluster) {
+    return fat_fs.data_start_lba + (cluster - 2) * fat_fs.bpb.sectors_per_cluster;
+}
+
+static uint32_t fat_next_cluster(uint32_t cluster) {
+    uint32_t fat_offset = (fat_fs.fat_type == 12) ? (cluster + cluster / 2) : (cluster * 2);
+    uint32_t fat_sector_lba = fat_fs.fat_start_lba + (fat_offset / 512);
+    uint32_t ent_offset = fat_offset % 512;
+
+    if (!ata_read_sector(fat_sector_lba, fat_sector)) {
+        return 0xFFFFFFFF;
+    }
+    if (fat_fs.fat_type == 12) {
+        uint16_t val = (uint16_t)fat_sector[ent_offset] | ((uint16_t)fat_sector[ent_offset + 1] << 8);
+        uint16_t next = (cluster & 1) ? (val >> 4) : (val & 0x0FFF);
+        return next;
+    }
+    return (uint16_t)fat_sector[ent_offset] | ((uint16_t)fat_sector[ent_offset + 1] << 8);
+}
+
+static int fat_read_root_entry(const char *name, uint32_t *start_cluster, uint32_t *size) {
+    if (!fat_fs.valid) {
+        return 0;
+    }
+    char target[11];
+    for (int i = 0; i < 11; ++i) {
+        target[i] = ' ';
+    }
+    int idx = 0;
+    for (const char *p = name; *p && idx < 11; ++p) {
+        if (*p == '.') {
+            idx = 8;
+            continue;
+        }
+        target[idx++] = (*p >= 'a' && *p <= 'z') ? (char)(*p - 32) : *p;
+    }
+
+    for (uint32_t s = 0; s < fat_fs.root_dir_sectors; ++s) {
+        if (!ata_read_sector(fat_fs.root_start_lba + s, fat_sector)) {
+            return 0;
+        }
+        for (int i = 0; i < 16; ++i) {
+            uint8_t *ent = &fat_sector[i * 32];
+            if (ent[0] == 0x00) {
+                return 0;
+            }
+            if (ent[0] == 0xE5 || ent[11] == 0x0F) {
+                continue;
+            }
+            int match = 1;
+            for (int j = 0; j < 11; ++j) {
+                if (ent[j] != (uint8_t)target[j]) {
+                    match = 0;
+                    break;
+                }
+            }
+            if (!match) {
+                continue;
+            }
+            *start_cluster = (uint16_t)(ent[26] | (ent[27] << 8));
+            *size = (uint32_t)(ent[28] | (ent[29] << 8) | (ent[30] << 16) | (ent[31] << 24));
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int fat_read_file(const char *name, uint8_t *out, uint32_t max_bytes, uint32_t *out_size) {
+    uint32_t cluster = 0;
+    uint32_t size = 0;
+    if (!fat_read_root_entry(name, &cluster, &size)) {
+        return 0;
+    }
+    uint32_t remaining = size;
+    uint32_t offset = 0;
+    while (cluster >= 2 && cluster < 0xFFF8 && remaining > 0 && offset < max_bytes) {
+        uint32_t lba = fat_cluster_to_lba(cluster);
+        for (uint32_t s = 0; s < fat_fs.bpb.sectors_per_cluster; ++s) {
+            if (!ata_read_sector(lba + s, fat_sector)) {
+                return 0;
+            }
+            uint32_t chunk = (remaining > 512) ? 512 : remaining;
+            if (offset + chunk > max_bytes) {
+                chunk = max_bytes - offset;
+            }
+            for (uint32_t i = 0; i < chunk; ++i) {
+                out[offset + i] = fat_sector[i];
+            }
+            offset += chunk;
+            if (remaining >= chunk) {
+                remaining -= chunk;
+            } else {
+                remaining = 0;
+            }
+            if (remaining == 0 || offset >= max_bytes) {
+                break;
+            }
+        }
+        cluster = fat_next_cluster(cluster);
+        if (fat_fs.fat_type == 12 && cluster >= 0xFF8) {
+            break;
+        }
+        if (fat_fs.fat_type == 16 && cluster >= 0xFFF8) {
+            break;
+        }
+    }
+    *out_size = offset;
+    return 1;
+}
+
+static void shell_cmd_lsdisk(void) {
+    if (!fat_fs.valid) {
+        userspace_write("disk fs: not detected\n");
+        return;
+    }
+    userspace_write("disk fs: FAT");
+    userspace_write((fat_fs.fat_type == 12) ? "12\n" : "16\n");
+}
+
+static void shell_cmd_catdisk(const char *name) {
+    if (!fat_fs.valid) {
+        userspace_write("disk fs: not detected\n");
+        return;
+    }
+    uint32_t out_size = 0;
+    if (!fat_read_file(name, file_buffer, sizeof(file_buffer) - 1, &out_size)) {
+        userspace_write("catdisk: not found\n");
+        return;
+    }
+    file_buffer[out_size] = 0;
+    userspace_write((char *)file_buffer);
+    userspace_write("\n");
+}
+
+static void shell_exec(char *line) {
+    if (line[0] == 0) {
+        return;
+    }
+    if (str_equal(line, "help")) {
+        shell_cmd_help();
+        return;
+    }
+    if (str_equal(line, "ls")) {
+        shell_cmd_ls();
+        return;
+    }
+    if (str_equal(line, "clear")) {
+        clear_console();
+        return;
+    }
+    if (str_equal(line, "pid")) {
+        userspace_write("pid=");
+        write_u64_hex((uint64_t)userspace_getpid());
+        userspace_write("\n");
+        return;
+    }
+    if (str_equal(line, "lsdisk")) {
+        shell_cmd_lsdisk();
+        return;
+    }
+    if (str_starts_with(line, "catdisk ")) {
+        shell_cmd_catdisk(line + 8);
+        return;
+    }
+    if (str_starts_with(line, "sleep ")) {
+        uint64_t ms = 0;
+        const char *p = line + 6;
+        while (*p >= '0' && *p <= '9') {
+            ms = ms * 10 + (uint64_t)(*p - '0');
+            p++;
+        }
+        userspace_sleep(ms);
+        return;
+    }
+    if (str_starts_with(line, "cat ")) {
+        shell_cmd_cat(line + 4);
+        return;
+    }
+    if (str_starts_with(line, "echo ")) {
+        userspace_write(line + 5);
+        userspace_write("\n");
+        return;
+    }
+    userspace_write("unknown command\n");
+}
+
+void kmain(const barecore_boot_info_t *boot_info) {
+    serial_put_char('M');
+
+    init_gdt_tss();
     init_console(boot_info);
     clear_console();
-    write_cstr("barecore kernel (professional profile)\n");
+    write_cstr("barecore kernel (production path)\n");
     write_cstr("long mode: OK\n");
 
     init_idt();
-    init_pic();
-    init_pit(PIT_HZ);
+    lapic_init();
+    init_pic(apic_enabled ? 1 : 0);
+    if (!apic_enabled) {
+        init_pit(PIT_HZ);
+    }
+
+    fat_init();
 
     create_task(task_a, "task-a");
     create_task(task_b, "task-b");
     create_task(task_shell, "shell");
 
     write_cstr("scheduler: round-robin\n");
-    write_cstr("drivers: PIT + PS/2 keyboard\n");
+    write_cstr("drivers: ");
+    write_cstr(apic_enabled ? "APIC timer + PS/2 keyboard\n" : "PIT + PS/2 keyboard\n");
     write_cstr("syscalls: write exit getpid sleep yield\n");
 
     cpu_sti();

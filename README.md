@@ -42,17 +42,17 @@ kernel/kernel.c
 
 ## GDT/IDT Layout
 
-### GDT (configured in `boot/stage2.asm`)
-- null descriptor
-- 32-bit code segment
-- 32-bit data segment
-- 64-bit code segment
-- 64-bit data segment
+### GDT
+- stage2: minimal 32/64-bit segments for mode transition
+- kernel: full 64-bit GDT with:
+  - kernel code/data
+  - user code/data (ring3-ready)
+  - TSS descriptor (RSP0 stack)
 
 ### IDT (configured in `kernel/kernel.c`)
 - `0`: divide-by-zero (`#DE`)
 - `14`: page fault (`#PF`)
-- `32`: PIT timer IRQ0
+- `32`: timer IRQ0 (APIC or PIT)
 - `33`: PS/2 keyboard IRQ1
 - `0x80`: syscall trap
 
@@ -63,20 +63,21 @@ Key regions (BIOS path):
 - `0x00008000`: stage2 loader
 - `0x00090000`: PML4
 - `0x00091000`: PDPT
-- `0x00092000`: PD
+- `0x00092000`: PD (identity map)
+- `0x00093000`: PD for LAPIC mapping
 - `0x00100000`: kernel image load address
 - `0x00200000`: kernel bootstrap stack top
 - `0x000B8000`: VGA text buffer (BIOS console fallback)
 
 BIOS kernel loader constraint:
-- fixed `KERNEL_SECTORS=64` in both:
+- fixed `KERNEL_SECTORS=128` in both:
   - `boot/stage2.asm`
   - `Makefile`
 
 ## Kernel Features
 
 ### Interrupts and Exceptions
-- PIT timer IRQ (`IRQ0`)
+- APIC timer (fallback to PIT)
 - PS/2 keyboard IRQ (`IRQ1`)
 - divide-by-zero handler with explicit panic message
 - page-fault handler with fault address (`CR2`) and error code
@@ -91,14 +92,17 @@ BIOS kernel loader constraint:
   - `task_shell` (interactive shell)
 
 ### Syscalls
-Implemented syscall ABI and dispatch table:
+ABI (current):
+- `rax`: syscall number
+- `rdi`, `rsi`: args 0..1
+- return in `rax`
+
+Implemented syscalls:
 - `write`
 - `exit`
 - `getpid`
 - `sleep`
 - `yield`
-
-Current kernel tasks use the same backend services directly for stability; `int 0x80` path is present for user-mode extension work.
 
 ### Console and Graphics
 - serial output (`COM1`) for debugging/CI
@@ -106,9 +110,11 @@ Current kernel tasks use the same backend services directly for stability; `int 
 - framebuffer fallback on UEFI path (GOP metadata from `uefi/bootx64.c`)
 - pixel primitive API in kernel (`fb_put_pixel`)
 
-### Filesystem (initrd-style)
-- in-memory file table for shell commands (`ls`, `cat`)
-- designed as an initrd stepping stone before on-disk FAT/Minix implementation
+### Filesystem
+- in-memory initrd-like table for `ls` / `cat`
+- on-disk FAT12/16 reader via ATA PIO:
+  - `lsdisk`
+  - `catdisk <FILE>`
 
 ### Shell
 Keyboard-driven shell commands:
@@ -119,6 +125,8 @@ Keyboard-driven shell commands:
 - `clear`
 - `pid`
 - `sleep <ms>`
+- `lsdisk`
+- `catdisk <file>`
 
 ## Build & Run
 
@@ -202,8 +210,8 @@ make CROSS=x86_64-linux-gnu- ci-runtime
 
 ## Roadmap
 
-- APIC timer backend (keep PIT as fallback)
-- ring3 user mode and full syscall transition path
-- on-disk FAT12/16 reader for real initrd/image loading
+- HPET timer backend
+- ring3 user mode transitions and user scheduler
+- on-disk ext2 reader
 - simplified `fork/exec` process API
 - richer framebuffer text/graphics renderer
