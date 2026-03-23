@@ -50,6 +50,9 @@
 #define LAPIC_DEFAULT_BASE 0xFEE00000u
 #define HPET_DEFAULT_BASE  0xFED00000u
 #define IOAPIC_DEFAULT_BASE 0xFEC00000u
+#define PML4_BASE_ADDR 0x00090000u
+#define PDPT_BASE_ADDR 0x00091000u
+#define PD_APIC_BASE_ADDR 0x00093000u
 
 typedef struct {
     uint64_t rax;
@@ -207,6 +210,54 @@ typedef struct {
     uint8_t valid;
 } fat_fs_t;
 
+typedef struct __attribute__((packed)) {
+    char signature[8];
+    uint8_t checksum;
+    char oem_id[6];
+    uint8_t revision;
+    uint32_t rsdt_addr;
+    uint32_t length;
+    uint64_t xsdt_addr;
+    uint8_t ext_checksum;
+    uint8_t reserved[3];
+} acpi_rsdp_t;
+
+typedef struct __attribute__((packed)) {
+    char signature[4];
+    uint32_t length;
+    uint8_t revision;
+    uint8_t checksum;
+    char oem_id[6];
+    char oem_table_id[8];
+    uint32_t oem_revision;
+    uint32_t creator_id;
+    uint32_t creator_revision;
+} acpi_sdt_t;
+
+typedef struct __attribute__((packed)) {
+    acpi_sdt_t header;
+    uint32_t lapic_addr;
+    uint32_t flags;
+    uint8_t entries[];
+} acpi_madt_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t address_space;
+    uint8_t bit_width;
+    uint8_t bit_offset;
+    uint8_t access_size;
+    uint64_t address;
+} acpi_gas_t;
+
+typedef struct __attribute__((packed)) {
+    acpi_sdt_t header;
+    uint32_t event_timer_block_id;
+    acpi_gas_t base_address;
+    uint8_t hpet_number;
+    uint16_t min_tick;
+    uint8_t page_protection;
+} acpi_hpet_t;
+
 extern void idt_load(idtr_t *idtr);
 extern void gdt_load(void *gdtr);
 extern void tss_load(uint16_t selector);
@@ -254,10 +305,13 @@ static uint8_t kbd_shift = 0;
 
 static uint8_t apic_enabled = 0;
 static uint32_t lapic_base = LAPIC_DEFAULT_BASE;
+static uint32_t ioapic_base = IOAPIC_DEFAULT_BASE;
+static uint32_t hpet_base = HPET_DEFAULT_BASE;
 static uint8_t hpet_enabled = 0;
 static uint64_t hpet_period_fs = 0;
 static uint8_t hpet_irq = 2;
 static uint8_t ioapic_enabled = 0;
+static uint8_t acpi_enabled = 0;
 
 static fat_fs_t fat_fs;
 static uint8_t fat_sector[512];
@@ -309,6 +363,10 @@ static inline void wrmsr(uint32_t msr, uint32_t lo, uint32_t hi) {
     __asm__ volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
 }
 
+static inline void invlpg(void *addr) {
+    __asm__ volatile("invlpg (%0)" : : "r"(addr) : "memory");
+}
+
 static inline void cpuid(uint32_t leaf, uint32_t *a, uint32_t *b, uint32_t *c, uint32_t *d) {
     __asm__ volatile("cpuid" : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d) : "a"(leaf));
 }
@@ -321,6 +379,17 @@ static inline uint32_t rgb_to_pixel(uint32_t rgb, uint32_t format) {
         return (r << 16) | (g << 8) | b;
     }
     return (b << 16) | (g << 8) | r;
+}
+
+static int mem_equal(const void *a, const void *b, size_t n) {
+    const uint8_t *pa = (const uint8_t *)a;
+    const uint8_t *pb = (const uint8_t *)b;
+    for (size_t i = 0; i < n; ++i) {
+        if (pa[i] != pb[i]) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static void serial_put_char(char c) {
@@ -587,6 +656,140 @@ static void init_pit(uint32_t hz) {
     outb(PIT_CHANNEL0, (uint8_t)((divisor >> 8) & 0xFF));
 }
 
+static uint8_t acpi_checksum_ok(const void *ptr, size_t len) {
+    const uint8_t *p = (const uint8_t *)ptr;
+    uint8_t sum = 0;
+    for (size_t i = 0; i < len; ++i) {
+        sum = (uint8_t)(sum + p[i]);
+    }
+    return sum == 0;
+}
+
+static const acpi_rsdp_t *acpi_find_rsdp(void) {
+    const char sig[8] = {'R','S','D',' ','P','T','R',' '};
+    uint16_t ebda_seg = *(volatile uint16_t *)(uintptr_t)0x40E;
+    uint32_t ebda = ((uint32_t)ebda_seg) << 4;
+    if (ebda >= 0x80000 && ebda <= 0x9FC00) {
+        for (uint32_t addr = ebda; addr < ebda + 1024; addr += 16) {
+            const acpi_rsdp_t *rsdp = (const acpi_rsdp_t *)(uintptr_t)addr;
+            if (mem_equal(rsdp->signature, sig, 8)) {
+                return rsdp;
+            }
+        }
+    }
+    for (uint32_t addr = 0xE0000; addr < 0x100000; addr += 16) {
+        const acpi_rsdp_t *rsdp = (const acpi_rsdp_t *)(uintptr_t)addr;
+        if (mem_equal(rsdp->signature, sig, 8)) {
+            return rsdp;
+        }
+    }
+    return 0;
+}
+
+static const acpi_sdt_t *acpi_find_sdt(const acpi_rsdp_t *rsdp, const char sig[4]) {
+    const acpi_sdt_t *xsdt = 0;
+    const acpi_sdt_t *rsdt = 0;
+    if (rsdp->revision >= 2 && rsdp->xsdt_addr) {
+        xsdt = (const acpi_sdt_t *)(uintptr_t)rsdp->xsdt_addr;
+        if (!acpi_checksum_ok(xsdt, xsdt->length)) {
+            xsdt = 0;
+        }
+    }
+    if (!xsdt && rsdp->rsdt_addr) {
+        rsdt = (const acpi_sdt_t *)(uintptr_t)rsdp->rsdt_addr;
+        if (!acpi_checksum_ok(rsdt, rsdt->length)) {
+            rsdt = 0;
+        }
+    }
+
+    const acpi_sdt_t *root = xsdt ? xsdt : rsdt;
+    if (!root) {
+        return 0;
+    }
+
+    if (root == xsdt) {
+        size_t count = (root->length - sizeof(acpi_sdt_t)) / 8;
+        const uint64_t *entries = (const uint64_t *)((const uint8_t *)root + sizeof(acpi_sdt_t));
+        for (size_t i = 0; i < count; ++i) {
+            const acpi_sdt_t *hdr = (const acpi_sdt_t *)(uintptr_t)entries[i];
+            if (mem_equal(hdr->signature, sig, 4) && acpi_checksum_ok(hdr, hdr->length)) {
+                return hdr;
+            }
+        }
+    } else {
+        size_t count = (root->length - sizeof(acpi_sdt_t)) / 4;
+        const uint32_t *entries = (const uint32_t *)((const uint8_t *)root + sizeof(acpi_sdt_t));
+        for (size_t i = 0; i < count; ++i) {
+            const acpi_sdt_t *hdr = (const acpi_sdt_t *)(uintptr_t)entries[i];
+            if (mem_equal(hdr->signature, sig, 4) && acpi_checksum_ok(hdr, hdr->length)) {
+                return hdr;
+            }
+        }
+    }
+    return 0;
+}
+
+static void map_mmio_2m(uint64_t phys) {
+    if (phys < 0xC0000000ULL || phys >= 0x100000000ULL) {
+        return;
+    }
+    uint64_t base = phys & ~0x1FFFFFULL;
+    volatile uint64_t *pd_apic = (volatile uint64_t *)(uintptr_t)PD_APIC_BASE_ADDR;
+    uint16_t idx = (uint16_t)((base >> 21) & 0x1FF);
+    pd_apic[idx] = base | 0x083;
+    invlpg((void *)(uintptr_t)base);
+}
+
+static void acpi_parse(void) {
+    const acpi_rsdp_t *rsdp = acpi_find_rsdp();
+    if (!rsdp) {
+        return;
+    }
+    size_t rsdp_len = (rsdp->revision >= 2 && rsdp->length) ? rsdp->length : 20;
+    if (!acpi_checksum_ok(rsdp, rsdp_len)) {
+        return;
+    }
+
+    const acpi_sdt_t *madt_hdr = acpi_find_sdt(rsdp, "APIC");
+    if (madt_hdr) {
+        const acpi_madt_t *madt = (const acpi_madt_t *)madt_hdr;
+        if (madt->lapic_addr && madt->lapic_addr >= 0xC0000000u) {
+            lapic_base = madt->lapic_addr;
+            map_mmio_2m(lapic_base);
+        }
+        const uint8_t *ptr = madt->entries;
+        const uint8_t *end = (const uint8_t *)madt + madt->header.length;
+        while (ptr + 2 <= end) {
+            uint8_t type = ptr[0];
+            uint8_t len = ptr[1];
+            if (len < 2 || ptr + len > end) {
+                break;
+            }
+            if (type == 1 && len >= 12) {
+                uint32_t addr = *(const uint32_t *)(ptr + 4);
+                if (addr && addr >= 0xC0000000u) {
+                    ioapic_base = addr;
+                    map_mmio_2m(ioapic_base);
+                }
+            }
+            ptr += len;
+        }
+        acpi_enabled = 1;
+    }
+
+    const acpi_sdt_t *hpet_hdr = acpi_find_sdt(rsdp, "HPET");
+    if (hpet_hdr) {
+        const acpi_hpet_t *hpet = (const acpi_hpet_t *)hpet_hdr;
+        if (hpet->base_address.address_space == 0 &&
+            hpet->base_address.address >= 0xC0000000ULL &&
+            hpet->base_address.address < 0x100000000ULL) {
+            hpet_base = (uint32_t)hpet->base_address.address;
+            map_mmio_2m(hpet_base);
+            acpi_enabled = 1;
+        }
+    }
+}
+
 static volatile uint32_t *lapic_reg(uint32_t offset) {
     return (volatile uint32_t *)(uintptr_t)(lapic_base + offset);
 }
@@ -607,6 +810,7 @@ static void lapic_init(void) {
     uint32_t lo, hi;
     rdmsr(0x1B, &lo, &hi);
     lo |= (1u << 11);
+    lo = (lo & 0x00000FFFu) | (lapic_base & 0xFFFFF000u);
     wrmsr(0x1B, lo, hi);
 
     lapic_base = (lo & 0xFFFFF000u);
@@ -626,7 +830,7 @@ static void lapic_eoi(void) {
 }
 
 static volatile uint64_t *hpet_reg(uint32_t offset) {
-    return (volatile uint64_t *)(uintptr_t)(HPET_DEFAULT_BASE + offset);
+    return (volatile uint64_t *)(uintptr_t)(hpet_base + offset);
 }
 
 static uint8_t hpet_pick_irq(void) {
@@ -660,7 +864,7 @@ static void hpet_init(void) {
 }
 
 static volatile uint32_t *ioapic_reg(uint32_t offset) {
-    return (volatile uint32_t *)(uintptr_t)(IOAPIC_DEFAULT_BASE + offset);
+    return (volatile uint32_t *)(uintptr_t)(ioapic_base + offset);
 }
 
 static void ioapic_write(uint8_t reg, uint32_t value) {
@@ -1566,6 +1770,8 @@ void kmain(const barecore_boot_info_t *boot_info) {
     clear_console();
     write_cstr("barecore kernel (production path)\n");
     write_cstr("long mode: OK\n");
+
+    acpi_parse();
 
     init_idt();
     lapic_init();

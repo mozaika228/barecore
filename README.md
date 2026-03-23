@@ -79,6 +79,7 @@ BIOS kernel loader constraint:
 ## Kernel Features
 
 ### Interrupts and Exceptions
+- ACPI RSDP + MADT/HPET parsing (LAPIC/IOAPIC/HPET addresses)
 - APIC timer (fallback to PIT), HPET+IOAPIC interrupt path when available
 - PS/2 keyboard IRQ (`IRQ1`)
 - divide-by-zero handler with explicit panic message
