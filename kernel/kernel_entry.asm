@@ -158,6 +158,7 @@ syscall_entry:
 isr_divide_stub:
     PUSH_REGS
     mov rdi, rsp
+    lea rsi, [rsp + 15 * 8]
     call exception_divide_handler
     POP_REGS
     iretq
@@ -166,6 +167,7 @@ isr_page_fault_stub:
     PUSH_REGS
     mov rdi, rsp
     mov rsi, [rsp + 15 * 8]
+    lea rdx, [rsp + 16 * 8]
     call exception_page_fault_handler
     POP_REGS
     add rsp, 8

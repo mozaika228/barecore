@@ -30,7 +30,7 @@ kernel/kernel_entry.asm
   - IDT loader helper
   - context switch primitive
   - ISR stubs for:
-      #DE, #PF, IRQ0(timer), IRQ1(keyboard), int 0x80(syscall)
+      #DE, #PF, IRQ0(timer), IRQ1(keyboard), int 0x80/syscall
 
 kernel/kernel.c
   - console (serial + VGA / framebuffer fallback)
@@ -83,8 +83,8 @@ BIOS kernel loader constraint:
 - APIC timer (fallback to PIT), HPET+IOAPIC interrupt path when available
 - PS/2 keyboard IRQ (`IRQ1`)
 - divide-by-zero handler with explicit panic message
-- page-fault handler with fault address (`CR2`) and error code
-- register dump + simple backtrace on exceptions
+- page-fault handler with fault address (`CR2`) and decoded error bits
+- unified panic path with register/frame dump + simple backtrace
 
 ### Scheduler and Processes
 - context switch in ASM (`switch_context`)
@@ -98,7 +98,7 @@ BIOS kernel loader constraint:
 - simplified `exec` (replaces current task entry)
 
 ### Syscalls
-ABI (current, ring3 via `int 0x80`):
+ABI (current, ring3 via `syscall`, fallback `int 0x80`):
 - `rax`: syscall number
 - `rdi`, `rsi`: args 0..1
 - return in `rax`
@@ -134,7 +134,10 @@ Keyboard-driven shell commands:
 - `pid`
 - `sleep <ms>`
 - `lsdisk`
-- `catdisk <file>`
+- `lsdisk <path>`
+- `catdisk <path>`
+- `runelf <path>`
+- `pciscan`
 - `fork`
 - `exec <a|b|shell>`
 - `userdemo` (ring3 transition demo)
@@ -197,6 +200,12 @@ gdb build/kernel.elf
 (gdb) target remote :1234
 (gdb) b kmain
 (gdb) c
+```
+
+Or with prepared script:
+
+```bash
+make CROSS=x86_64-linux-gnu- gdb-attach
 ```
 
 Alternative launcher:

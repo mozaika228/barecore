@@ -364,6 +364,7 @@ static uint8_t sched_preempt = 0;
 static uint64_t sched_quantum = 5;
 static uint8_t syscall_enabled = 0;
 static uint8_t syscall_stack[STACK_SIZE];
+static volatile uint8_t panic_active = 0;
 
 static fat_fs_t fat_fs;
 static uint8_t fat_sector[512];
@@ -625,6 +626,37 @@ static void dump_backtrace(uint64_t rbp) {
         uint64_t ret = frame[1];
         write_cstr("  "); write_u64_hex(ret); write_cstr("\n");
         rbp = frame[0];
+    }
+}
+
+static void dump_irq_frame(const irq_frame_t *f) {
+    if (!f) {
+        return;
+    }
+    write_cstr("RIP="); write_u64_hex(f->rip); write_cstr(" CS="); write_u64_hex(f->cs); write_cstr("\n");
+    write_cstr("RFLAGS="); write_u64_hex(f->rflags); write_cstr(" RSP="); write_u64_hex(f->rsp); write_cstr("\n");
+    write_cstr("SS="); write_u64_hex(f->ss); write_cstr("\n");
+}
+
+static void panic_halt(const char *title, const regs_t *regs, const irq_frame_t *frame) {
+    cpu_cli();
+    if (panic_active) {
+        for (;;) {
+            cpu_halt();
+        }
+    }
+    panic_active = 1;
+    write_cstr("\n\n=== PANIC === ");
+    write_cstr(title);
+    write_cstr("\n");
+    if (regs) {
+        dump_regs(regs);
+        dump_backtrace(regs->rbp);
+    }
+    dump_irq_frame(frame);
+    write_cstr("System halted.\n");
+    for (;;) {
+        cpu_halt();
     }
 }
 
@@ -1568,35 +1600,26 @@ void irq_keyboard_handler(regs_t *regs) {
     }
 }
 
-void exception_divide_handler(regs_t *regs) {
-    (void)regs;
-    write_cstr("\n\n=== EXCEPTION: DIVIDE BY ZERO (#DE) ===\n");
-    dump_regs(regs);
-    dump_backtrace(regs->rbp);
-    write_cstr("Kernel halted for safety.\n");
-    cpu_cli();
-    for (;;) {
-        cpu_halt();
-    }
+void exception_divide_handler(regs_t *regs, irq_frame_t *frame) {
+    panic_halt("EXCEPTION: DIVIDE BY ZERO (#DE)", regs, frame);
 }
 
-void exception_page_fault_handler(regs_t *regs, uint64_t error_code) {
+void exception_page_fault_handler(regs_t *regs, uint64_t error_code, irq_frame_t *frame) {
     uint64_t cr2;
-    (void)regs;
     __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
 
-    write_cstr("\n\n=== EXCEPTION: PAGE FAULT (#PF) ===\n");
-    write_cstr("fault_addr=");
+    write_cstr("\nPage fault details: addr=");
     write_u64_hex(cr2);
-    write_cstr(" error_code=");
+    write_cstr(" err=");
     write_u64_hex(error_code);
-    write_cstr("\nKernel halted for safety.\n");
-    dump_regs(regs);
-    dump_backtrace(regs->rbp);
-    cpu_cli();
-    for (;;) {
-        cpu_halt();
-    }
+    write_cstr(" [");
+    write_cstr((error_code & 1) ? "PRESENT " : "NOT-PRESENT ");
+    write_cstr((error_code & 2) ? "WRITE " : "READ ");
+    write_cstr((error_code & 4) ? "USER " : "KERNEL ");
+    write_cstr((error_code & 8) ? "RSVD " : "");
+    write_cstr((error_code & 16) ? "INSTR " : "");
+    write_cstr("]\n");
+    panic_halt("EXCEPTION: PAGE FAULT (#PF)", regs, frame);
 }
 
 void syscall_dispatch(regs_t *regs) {

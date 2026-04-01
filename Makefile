@@ -19,7 +19,7 @@ EFI_LDFLAGS ?= -nostdlib -znocombreloc -T $(EFI_LDS) -shared -Bsymbolic
 EFI_LIBS ?= -L$(EFI_LIBDIR) -lefi -lgnuefi
 OVMF ?= OVMF.fd
 
-.PHONY: all clean run run-gdb uefi run-uefi ci-smoke ci-runtime verify-kernel-size
+.PHONY: all clean run run-gdb gdb-attach uefi run-uefi ci-smoke ci-runtime verify-kernel-size
 
 all: $(BUILD_DIR)/os.img
 
@@ -91,6 +91,9 @@ run-gdb: $(BUILD_DIR)/os.img
 		-drive format=raw,file=$(BUILD_DIR)/os.img \
 		-serial stdio \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04
+
+gdb-attach: $(BUILD_DIR)/kernel.elf
+	gdb -x scripts/gdb-kernel.gdb $(BUILD_DIR)/kernel.elf
 
 run-uefi: uefi
 	qemu-system-x86_64 -bios $(OVMF) -drive format=raw,file=fat:rw:$(BUILD_DIR)/esp -serial stdio -device isa-debug-exit,iobase=0xf4,iosize=0x04
