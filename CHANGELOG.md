@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.0 - 2026-04-01
+
+### Release
+- Promoted `1.0.0-rc1` to final `1.0.0`.
+- No functional changes from `1.0.0-rc1`; this is a stabilization/finalization tag.
+
 ## 1.0.0-rc1 - 2026-04-01
 
 ### Boot and Platform
