@@ -318,6 +318,8 @@ static uint8_t ioapic_enabled = 0;
 static uint8_t acpi_enabled = 0;
 static uint8_t heap_enabled = 0;
 static uint8_t *heap_brk = (uint8_t *)(uintptr_t)HEAP_BASE;
+static uint8_t sched_preempt = 0;
+static uint64_t sched_quantum = 5;
 
 static fat_fs_t fat_fs;
 static uint8_t fat_sector[512];
@@ -1412,6 +1414,9 @@ void irq_timer_handler(regs_t *regs, irq_frame_t *frame) {
     ticks++;
     scheduler_wake_sleepers();
     ring3_preempt(frame);
+    if (sched_preempt && (ticks % sched_quantum) == 0) {
+        schedule();
+    }
     if (apic_enabled) {
         lapic_eoi();
     } else {
@@ -1501,6 +1506,7 @@ void syscall_dispatch(regs_t *regs) {
         if (ring3_enabled && current_user >= 0) {
             user_need_resched = 1;
         }
+        schedule();
         regs->rax = 0;
         break;
     default:
