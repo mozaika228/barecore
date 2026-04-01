@@ -268,6 +268,40 @@ typedef struct __attribute__((packed)) {
     uint8_t page_protection;
 } acpi_hpet_t;
 
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint8_t bit_class;
+    uint8_t endian;
+    uint8_t ident_ver;
+    uint8_t abi;
+    uint8_t abi_ver;
+    uint8_t pad[7];
+    uint16_t type;
+    uint16_t machine;
+    uint32_t version;
+    uint64_t entry;
+    uint64_t phoff;
+    uint64_t shoff;
+    uint32_t flags;
+    uint16_t ehsize;
+    uint16_t phentsize;
+    uint16_t phnum;
+    uint16_t shentsize;
+    uint16_t shnum;
+    uint16_t shstrndx;
+} elf64_ehdr_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t type;
+    uint32_t flags;
+    uint64_t offset;
+    uint64_t vaddr;
+    uint64_t paddr;
+    uint64_t filesz;
+    uint64_t memsz;
+    uint64_t align;
+} elf64_phdr_t;
+
 extern void idt_load(idtr_t *idtr);
 extern void gdt_load(void *gdtr);
 extern void tss_load(uint16_t selector);
@@ -334,6 +368,7 @@ static uint8_t syscall_stack[STACK_SIZE];
 static fat_fs_t fat_fs;
 static uint8_t fat_sector[512];
 static uint8_t file_buffer[4096];
+static uint8_t elf_buffer[32768];
 
 static const initrd_file_t initrd_files[] = {
     {"README.TXT", "barecore initrd\n"},
@@ -1352,7 +1387,7 @@ static int str_starts_with(const char *s, const char *prefix) {
 }
 
 static void shell_cmd_help(void) {
-    userspace_write("commands: help ls cat echo clear pid sleep lsdisk catdisk fork exec userdemo userpreempt pciscan\n");
+    userspace_write("commands: help ls cat echo clear pid sleep lsdisk catdisk runelf fork exec userdemo userpreempt pciscan\n");
 }
 
 static void shell_cmd_ls(void) {
@@ -1988,6 +2023,78 @@ static int fat_read_file_by_cluster(uint32_t cluster, uint32_t size, uint8_t *ou
     return 1;
 }
 
+static int elf_load_image(const uint8_t *buf, uint32_t len, uint64_t *entry_out) {
+    if (len < sizeof(elf64_ehdr_t)) {
+        return 0;
+    }
+    const elf64_ehdr_t *eh = (const elf64_ehdr_t *)buf;
+    if (eh->magic != 0x464C457Fu) {
+        return 0;
+    }
+    if (eh->bit_class != 2 || eh->endian != 1 || eh->ident_ver != 1) {
+        return 0;
+    }
+    if (eh->type != 2 || eh->machine != 0x3E || eh->phentsize != sizeof(elf64_phdr_t)) {
+        return 0;
+    }
+    if ((uint64_t)eh->phoff + (uint64_t)eh->phnum * sizeof(elf64_phdr_t) > len) {
+        return 0;
+    }
+    for (uint16_t i = 0; i < eh->phnum; ++i) {
+        const elf64_phdr_t *ph = (const elf64_phdr_t *)(buf + eh->phoff + (uint64_t)i * sizeof(elf64_phdr_t));
+        if (ph->type != 1) {
+            continue;
+        }
+        if (ph->filesz > ph->memsz) {
+            return 0;
+        }
+        if ((uint64_t)ph->offset + ph->filesz > len) {
+            return 0;
+        }
+        uint8_t *dst = (uint8_t *)(uintptr_t)ph->vaddr;
+        const uint8_t *src = buf + ph->offset;
+        for (uint64_t j = 0; j < ph->filesz; ++j) {
+            dst[j] = src[j];
+        }
+        for (uint64_t j = ph->filesz; j < ph->memsz; ++j) {
+            dst[j] = 0;
+        }
+    }
+    *entry_out = eh->entry;
+    return 1;
+}
+
+static void shell_cmd_runelf(const char *path) {
+    if (!fat_fs.valid) {
+        userspace_write("disk fs: not detected\n");
+        return;
+    }
+    uint32_t cluster = 0;
+    uint32_t size = 0;
+    uint8_t attr = 0;
+    if (!fat_resolve_path(path, &cluster, &size, &attr) || (attr & 0x10)) {
+        userspace_write("runelf: not found\n");
+        return;
+    }
+    if (size >= sizeof(elf_buffer)) {
+        userspace_write("runelf: too large\n");
+        return;
+    }
+    uint32_t out_size = 0;
+    if (!fat_read_file_by_cluster(cluster, size, elf_buffer, sizeof(elf_buffer) - 1, &out_size)) {
+        userspace_write("runelf: read error\n");
+        return;
+    }
+    uint64_t entry = 0;
+    if (!elf_load_image(elf_buffer, out_size, &entry)) {
+        userspace_write("runelf: invalid ELF\n");
+        return;
+    }
+    userspace_write("runelf: jumping to entry\n");
+    void (*entry_fn)(void) = (void (*)(void))(uintptr_t)entry;
+    entry_fn();
+}
+
 static void shell_cmd_lsdisk(void) {
     if (!fat_fs.valid) {
         userspace_write("disk fs: not detected\n");
@@ -2075,6 +2182,10 @@ static void shell_exec(char *line) {
     }
     if (str_starts_with(line, "catdisk ")) {
         shell_cmd_catdisk(line + 8);
+        return;
+    }
+    if (str_starts_with(line, "runelf ")) {
+        shell_cmd_runelf(line + 7);
         return;
     }
     if (str_equal(line, "pciscan")) {
