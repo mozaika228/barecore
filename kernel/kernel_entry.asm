@@ -11,6 +11,7 @@ global isr_keyboard_stub
 global isr_syscall_stub
 global isr_divide_stub
 global isr_page_fault_stub
+global syscall_entry
 
 extern kmain
 extern irq_timer_handler
@@ -18,6 +19,7 @@ extern irq_keyboard_handler
 extern syscall_dispatch
 extern exception_divide_handler
 extern exception_page_fault_handler
+extern syscall_stack_top
 
 section .text
 
@@ -143,6 +145,16 @@ isr_syscall_stub:
     POP_REGS
     iretq
 
+syscall_entry:
+    mov [rel syscall_user_rsp], rsp
+    mov rsp, [rel syscall_stack_top]
+    PUSH_REGS
+    mov rdi, rsp
+    call syscall_dispatch
+    POP_REGS
+    mov rsp, [rel syscall_user_rsp]
+    sysretq
+
 isr_divide_stub:
     PUSH_REGS
     mov rdi, rsp
@@ -158,3 +170,7 @@ isr_page_fault_stub:
     POP_REGS
     add rsp, 8
     iretq
+
+section .bss
+align 8
+syscall_user_rsp: resq 1

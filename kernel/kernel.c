@@ -39,6 +39,10 @@
 #define SYS_YIELD   5
 #define SYS_FORK    6
 #define SYS_EXEC    7
+#define MSR_EFER    0xC0000080u
+#define MSR_STAR    0xC0000081u
+#define MSR_LSTAR   0xC0000082u
+#define MSR_FMASK   0xC0000084u
 
 #define GDT_KERNEL_CODE 0x08
 #define GDT_KERNEL_DATA 0x10
@@ -272,6 +276,8 @@ extern void isr_keyboard_stub(void);
 extern void isr_syscall_stub(void);
 extern void isr_divide_stub(void);
 extern void isr_page_fault_stub(void);
+extern void syscall_entry(void);
+uint64_t syscall_stack_top = 0;
 
 static idt_gate_t idt[IDT_ENTRIES];
 static idtr_t idtr;
@@ -320,6 +326,8 @@ static uint8_t heap_enabled = 0;
 static uint8_t *heap_brk = (uint8_t *)(uintptr_t)HEAP_BASE;
 static uint8_t sched_preempt = 0;
 static uint64_t sched_quantum = 5;
+static uint8_t syscall_enabled = 0;
+static uint8_t syscall_stack[STACK_SIZE];
 
 static fat_fs_t fat_fs;
 static uint8_t fat_sector[512];
@@ -819,6 +827,19 @@ static void init_kernel_heap(void) {
     }
     heap_brk = (uint8_t *)(uintptr_t)HEAP_BASE;
     heap_enabled = 1;
+}
+
+static void init_syscall_abi(void) {
+    uint32_t lo, hi;
+    uint64_t star = ((uint64_t)GDT_KERNEL_CODE << 32) | ((uint64_t)0x13 << 48);
+    wrmsr(MSR_STAR, (uint32_t)star, (uint32_t)(star >> 32));
+    wrmsr(MSR_LSTAR, (uint32_t)(uintptr_t)syscall_entry, (uint32_t)((uint64_t)(uintptr_t)syscall_entry >> 32));
+    wrmsr(MSR_FMASK, (uint32_t)(1u << 9), 0);
+    rdmsr(MSR_EFER, &lo, &hi);
+    lo |= 1u;
+    wrmsr(MSR_EFER, lo, hi);
+    syscall_stack_top = (uint64_t)(uintptr_t)(syscall_stack + sizeof(syscall_stack));
+    syscall_enabled = 1;
 }
 
 static void *kmalloc(size_t size) {
@@ -1803,13 +1824,27 @@ static void shell_exec(char *line) {
 
 static inline long user_syscall2(long num, long a0, long a1) {
     long ret;
-    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(num), "D"(a0), "S"(a1) : "memory");
+    if (syscall_enabled) {
+        __asm__ volatile("syscall"
+                         : "=a"(ret)
+                         : "a"(num), "D"(a0), "S"(a1)
+                         : "rcx", "r11", "memory");
+    } else {
+        __asm__ volatile("int $0x80" : "=a"(ret) : "a"(num), "D"(a0), "S"(a1) : "memory");
+    }
     return ret;
 }
 
 static inline long user_syscall1(long num, long a0) {
     long ret;
-    __asm__ volatile("int $0x80" : "=a"(ret) : "a"(num), "D"(a0) : "memory");
+    if (syscall_enabled) {
+        __asm__ volatile("syscall"
+                         : "=a"(ret)
+                         : "a"(num), "D"(a0)
+                         : "rcx", "r11", "memory");
+    } else {
+        __asm__ volatile("int $0x80" : "=a"(ret) : "a"(num), "D"(a0) : "memory");
+    }
     return ret;
 }
 
@@ -1876,6 +1911,7 @@ void kmain(const barecore_boot_info_t *boot_info) {
 
     acpi_parse();
     init_kernel_heap();
+    init_syscall_abi();
 
     init_idt();
     lapic_init();
