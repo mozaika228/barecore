@@ -377,6 +377,9 @@ static const initrd_file_t initrd_files[] = {
     {"SYSINFO.TXT", "Kernel: x86_64, scheduler: round-robin, timer: APIC/PIT\n"},
 };
 
+static void put_char(char c);
+static long userspace_write(const char *s);
+
 static inline void outb(uint16_t port, uint8_t value) {
     __asm__ volatile("outb %0, %1" : : "a"(value), "Nd"(port));
 }

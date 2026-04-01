@@ -153,7 +153,7 @@ syscall_entry:
     call syscall_dispatch
     POP_REGS
     mov rsp, [rel syscall_user_rsp]
-    sysretq
+    sysret
 
 isr_divide_stub:
     PUSH_REGS
