@@ -18,8 +18,10 @@ EFI_LIBDIR ?= /usr/lib
 EFI_LDFLAGS ?= -nostdlib -znocombreloc -T $(EFI_LDS) -shared -Bsymbolic
 EFI_LIBS ?= -L$(EFI_LIBDIR) -lefi -lgnuefi
 OVMF ?= OVMF.fd
+VERSION := $(shell cat VERSION 2>/dev/null || echo dev)
+DIST_DIR := $(BUILD_DIR)/dist/$(VERSION)
 
-.PHONY: all clean run run-gdb gdb-attach uefi run-uefi ci-smoke ci-runtime verify-kernel-size
+.PHONY: all clean run run-gdb gdb-attach uefi run-uefi ci-smoke ci-runtime verify-kernel-size print-version dist release-check
 
 all: $(BUILD_DIR)/os.img
 
@@ -121,6 +123,18 @@ ci-runtime: $(BUILD_DIR)/os.img
 	grep -q "barecore kernel (production path)" $(BUILD_DIR)/qemu-runtime.log
 	grep -q "scheduler: round-robin" $(BUILD_DIR)/qemu-runtime.log
 	grep -q "drivers: PIT + PS/2 keyboard" $(BUILD_DIR)/qemu-runtime.log
+
+print-version:
+	@echo $(VERSION)
+
+dist: $(BUILD_DIR)/os.img $(BUILD_DIR)/kernel.elf $(BUILD_DIR)/kernel.bin
+	mkdir -p $(DIST_DIR)
+	cp $(BUILD_DIR)/os.img $(DIST_DIR)/
+	cp $(BUILD_DIR)/kernel.elf $(DIST_DIR)/
+	cp $(BUILD_DIR)/kernel.bin $(DIST_DIR)/
+	sha256sum $(DIST_DIR)/os.img $(DIST_DIR)/kernel.elf $(DIST_DIR)/kernel.bin > $(DIST_DIR)/SHA256SUMS
+
+release-check: ci-smoke ci-runtime
 
 clean:
 	rm -rf $(BUILD_DIR)

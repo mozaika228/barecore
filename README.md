@@ -242,6 +242,17 @@ make CROSS=x86_64-linux-gnu- ci-smoke
 make CROSS=x86_64-linux-gnu- ci-runtime
 ```
 
+## Release Tooling
+
+- Current release version:
+  - `cat VERSION`
+- Run release gates:
+  - `make CROSS=x86_64-linux-gnu- release-check`
+- Build release artifacts + checksums:
+  - `make CROSS=x86_64-linux-gnu- dist`
+- Changelog:
+  - `CHANGELOG.md`
+
 ## Roadmap
 
 - HPET timer backend

@@ -73,8 +73,11 @@ Use this checklist before tagging a release or demo build.
   - `build/kernel.elf`
   - `build/kernel.bin`
   - `build/os.img`
+- [ ] release tooling passes:
+  - `make CROSS=x86_64-linux-gnu- print-version`
+  - `make CROSS=x86_64-linux-gnu- release-check`
+  - `make CROSS=x86_64-linux-gnu- dist`
 - [ ] create release notes (highlights + breaking changes + known issues)
 - [ ] create and push tag:
   - `git tag <version>`
   - `git push origin <version>`
-

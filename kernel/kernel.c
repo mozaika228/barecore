@@ -66,6 +66,7 @@
 #define PAGE_SIZE 4096u
 #define HEAP_BASE 0x0001000000u
 #define HEAP_PAGES 64u
+#define IDENTITY_MAP_LIMIT 0x00200000u
 
 typedef struct {
     uint64_t rax;
@@ -1488,6 +1489,19 @@ static void task_sleep_ticks(uint64_t sleep_ticks) {
 }
 
 static long ksys_write(const char *buf, size_t len) {
+    if (!buf) {
+        return -1;
+    }
+    if (len > 4096) {
+        len = 4096;
+    }
+    if (len > 0) {
+        uint64_t start = (uint64_t)(uintptr_t)buf;
+        uint64_t end = start + (uint64_t)len - 1;
+        if (end < start || start >= IDENTITY_MAP_LIMIT || end >= IDENTITY_MAP_LIMIT) {
+            return -1;
+        }
+    }
     write_text(buf, len);
     return (long)len;
 }
