@@ -1663,12 +1663,228 @@ static int fat_read_root_entry(const char *name, uint32_t *start_cluster, uint32
     return 0;
 }
 
-static int fat_read_file(const char *name, uint8_t *out, uint32_t max_bytes, uint32_t *out_size) {
-    uint32_t cluster = 0;
-    uint32_t size = 0;
-    if (!fat_read_root_entry(name, &cluster, &size)) {
+static int fat_format_name(const char *name, char out[11]) {
+    for (int i = 0; i < 11; ++i) {
+        out[i] = ' ';
+    }
+    int idx = 0;
+    int ext = 0;
+    for (const char *p = name; *p; ++p) {
+        if (*p == '/') {
+            return 0;
+        }
+        if (*p == '.') {
+            ext = 1;
+            idx = 8;
+            continue;
+        }
+        if (idx >= 11) {
+            return 0;
+        }
+        char c = *p;
+        if (c >= 'a' && c <= 'z') {
+            c = (char)(c - 32);
+        }
+        out[idx++] = c;
+        if (!ext && idx == 8 && p[1] && p[1] != '.') {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int fat_entry_match(const uint8_t *ent, const char target[11]) {
+    for (int i = 0; i < 11; ++i) {
+        if (ent[i] != (uint8_t)target[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int fat_dir_find_entry(uint32_t dir_cluster, const char *name, uint32_t *start_cluster, uint32_t *size, uint8_t *attr) {
+    char target[11];
+    if (!fat_format_name(name, target)) {
         return 0;
     }
+    if (dir_cluster == 0) {
+        for (uint32_t s = 0; s < fat_fs.root_dir_sectors; ++s) {
+            if (!ata_read_sector(fat_fs.root_start_lba + s, fat_sector)) {
+                return 0;
+            }
+            for (int i = 0; i < 16; ++i) {
+                uint8_t *ent = &fat_sector[i * 32];
+                if (ent[0] == 0x00) {
+                    return 0;
+                }
+                if (ent[0] == 0xE5 || ent[11] == 0x0F || (ent[11] & 0x08)) {
+                    continue;
+                }
+                if (!fat_entry_match(ent, target)) {
+                    continue;
+                }
+                *start_cluster = (uint16_t)(ent[26] | (ent[27] << 8));
+                *size = (uint32_t)(ent[28] | (ent[29] << 8) | (ent[30] << 16) | (ent[31] << 24));
+                *attr = ent[11];
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    uint32_t cluster = dir_cluster;
+    while (cluster >= 2 && cluster < 0xFFF8) {
+        uint32_t lba = fat_cluster_to_lba(cluster);
+        for (uint32_t s = 0; s < fat_fs.bpb.sectors_per_cluster; ++s) {
+            if (!ata_read_sector(lba + s, fat_sector)) {
+                return 0;
+            }
+            for (int i = 0; i < 16; ++i) {
+                uint8_t *ent = &fat_sector[i * 32];
+                if (ent[0] == 0x00) {
+                    return 0;
+                }
+                if (ent[0] == 0xE5 || ent[11] == 0x0F || (ent[11] & 0x08)) {
+                    continue;
+                }
+                if (!fat_entry_match(ent, target)) {
+                    continue;
+                }
+                *start_cluster = (uint16_t)(ent[26] | (ent[27] << 8));
+                *size = (uint32_t)(ent[28] | (ent[29] << 8) | (ent[30] << 16) | (ent[31] << 24));
+                *attr = ent[11];
+                return 1;
+            }
+        }
+        cluster = fat_next_cluster(cluster);
+        if (fat_fs.fat_type == 12 && cluster >= 0xFF8) {
+            break;
+        }
+        if (fat_fs.fat_type == 16 && cluster >= 0xFFF8) {
+            break;
+        }
+    }
+    return 0;
+}
+
+static int fat_resolve_path(const char *path, uint32_t *start_cluster, uint32_t *size, uint8_t *attr) {
+    if (!path || !path[0]) {
+        return 0;
+    }
+    while (*path == '/') {
+        path++;
+    }
+    uint32_t dir = 0;
+    uint32_t cluster = 0;
+    uint32_t fsize = 0;
+    uint8_t fattr = 0;
+    const char *seg = path;
+    while (*seg) {
+        const char *end = seg;
+        while (*end && *end != '/') {
+            end++;
+        }
+        char name[13];
+        int len = 0;
+        for (const char *p = seg; p < end && len < 12; ++p) {
+            name[len++] = *p;
+        }
+        name[len] = 0;
+        if (!fat_dir_find_entry(dir, name, &cluster, &fsize, &fattr)) {
+            return 0;
+        }
+        if (*end == '/') {
+            if ((fattr & 0x10) == 0) {
+                return 0;
+            }
+            dir = cluster;
+            seg = end + 1;
+            while (*seg == '/') {
+                seg++;
+            }
+            continue;
+        }
+        *start_cluster = cluster;
+        *size = fsize;
+        *attr = fattr;
+        return 1;
+    }
+    return 0;
+}
+
+static void fat_print_name(const uint8_t *ent) {
+    char name[13];
+    int pos = 0;
+    for (int i = 0; i < 8; ++i) {
+        if (ent[i] == ' ') {
+            break;
+        }
+        name[pos++] = (char)ent[i];
+    }
+    if (ent[8] != ' ') {
+        name[pos++] = '.';
+        for (int i = 8; i < 11; ++i) {
+            if (ent[i] == ' ') {
+                break;
+            }
+            name[pos++] = (char)ent[i];
+        }
+    }
+    name[pos] = 0;
+    userspace_write(name);
+    userspace_write((ent[11] & 0x10) ? "/\n" : "\n");
+}
+
+static int fat_list_dir(uint32_t dir_cluster) {
+    if (dir_cluster == 0) {
+        for (uint32_t s = 0; s < fat_fs.root_dir_sectors; ++s) {
+            if (!ata_read_sector(fat_fs.root_start_lba + s, fat_sector)) {
+                return 0;
+            }
+            for (int i = 0; i < 16; ++i) {
+                uint8_t *ent = &fat_sector[i * 32];
+                if (ent[0] == 0x00) {
+                    return 1;
+                }
+                if (ent[0] == 0xE5 || ent[11] == 0x0F || (ent[11] & 0x08)) {
+                    continue;
+                }
+                fat_print_name(ent);
+            }
+        }
+        return 1;
+    }
+
+    uint32_t cluster = dir_cluster;
+    while (cluster >= 2 && cluster < 0xFFF8) {
+        uint32_t lba = fat_cluster_to_lba(cluster);
+        for (uint32_t s = 0; s < fat_fs.bpb.sectors_per_cluster; ++s) {
+            if (!ata_read_sector(lba + s, fat_sector)) {
+                return 0;
+            }
+            for (int i = 0; i < 16; ++i) {
+                uint8_t *ent = &fat_sector[i * 32];
+                if (ent[0] == 0x00) {
+                    return 1;
+                }
+                if (ent[0] == 0xE5 || ent[11] == 0x0F || (ent[11] & 0x08)) {
+                    continue;
+                }
+                fat_print_name(ent);
+            }
+        }
+        cluster = fat_next_cluster(cluster);
+        if (fat_fs.fat_type == 12 && cluster >= 0xFF8) {
+            break;
+        }
+        if (fat_fs.fat_type == 16 && cluster >= 0xFFF8) {
+            break;
+        }
+    }
+    return 1;
+}
+
+static int fat_read_file_by_cluster(uint32_t cluster, uint32_t size, uint8_t *out, uint32_t max_bytes, uint32_t *out_size) {
     uint32_t remaining = size;
     uint32_t offset = 0;
     while (cluster >= 2 && cluster < 0xFFF8 && remaining > 0 && offset < max_bytes) {
@@ -1713,6 +1929,30 @@ static void shell_cmd_lsdisk(void) {
     }
     userspace_write("disk fs: FAT");
     userspace_write((fat_fs.fat_type == 12) ? "12\n" : "16\n");
+    fat_list_dir(0);
+}
+
+static void shell_cmd_lsdisk_path(const char *path) {
+    if (!fat_fs.valid) {
+        userspace_write("disk fs: not detected\n");
+        return;
+    }
+    if (!path || path[0] == 0 || (path[0] == '/' && path[1] == 0)) {
+        fat_list_dir(0);
+        return;
+    }
+    uint32_t cluster = 0;
+    uint32_t size = 0;
+    uint8_t attr = 0;
+    if (!fat_resolve_path(path, &cluster, &size, &attr)) {
+        userspace_write("lsdisk: not found\n");
+        return;
+    }
+    if ((attr & 0x10) == 0) {
+        userspace_write("lsdisk: not a directory\n");
+        return;
+    }
+    fat_list_dir(cluster);
 }
 
 static void shell_cmd_catdisk(const char *name) {
@@ -1721,8 +1961,15 @@ static void shell_cmd_catdisk(const char *name) {
         return;
     }
     uint32_t out_size = 0;
-    if (!fat_read_file(name, file_buffer, sizeof(file_buffer) - 1, &out_size)) {
+    uint32_t cluster = 0;
+    uint32_t size = 0;
+    uint8_t attr = 0;
+    if (!fat_resolve_path(name, &cluster, &size, &attr) || (attr & 0x10)) {
         userspace_write("catdisk: not found\n");
+        return;
+    }
+    if (!fat_read_file_by_cluster(cluster, size, file_buffer, sizeof(file_buffer) - 1, &out_size)) {
+        userspace_write("catdisk: read error\n");
         return;
     }
     file_buffer[out_size] = 0;
@@ -1754,6 +2001,10 @@ static void shell_exec(char *line) {
     }
     if (str_equal(line, "lsdisk")) {
         shell_cmd_lsdisk();
+        return;
+    }
+    if (str_starts_with(line, "lsdisk ")) {
+        shell_cmd_lsdisk_path(line + 7);
         return;
     }
     if (str_starts_with(line, "catdisk ")) {
