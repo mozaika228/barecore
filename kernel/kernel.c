@@ -53,6 +53,10 @@
 #define PML4_BASE_ADDR 0x00090000u
 #define PDPT_BASE_ADDR 0x00091000u
 #define PD_APIC_BASE_ADDR 0x00093000u
+#define PD_BASE_ADDR 0x00092000u
+#define PAGE_SIZE 4096u
+#define HEAP_BASE 0x0001000000u
+#define HEAP_PAGES 64u
 
 typedef struct {
     uint64_t rax;
@@ -312,6 +316,8 @@ static uint64_t hpet_period_fs = 0;
 static uint8_t hpet_irq = 2;
 static uint8_t ioapic_enabled = 0;
 static uint8_t acpi_enabled = 0;
+static uint8_t heap_enabled = 0;
+static uint8_t *heap_brk = (uint8_t *)(uintptr_t)HEAP_BASE;
 
 static fat_fs_t fat_fs;
 static uint8_t fat_sector[512];
@@ -389,6 +395,50 @@ static int mem_equal(const void *a, const void *b, size_t n) {
             return 0;
         }
     }
+    return 1;
+}
+
+static uint64_t read_pte(void *table, uint16_t idx) {
+    volatile uint64_t *t = (volatile uint64_t *)(uintptr_t)table;
+    return t[idx];
+}
+
+static void write_pte(void *table, uint16_t idx, uint64_t value) {
+    volatile uint64_t *t = (volatile uint64_t *)(uintptr_t)table;
+    t[idx] = value;
+}
+
+static uint64_t *get_pt_for(uint64_t vaddr) {
+    uint64_t pml4 = PML4_BASE_ADDR;
+    uint16_t pml4_idx = (uint16_t)((vaddr >> 39) & 0x1FF);
+    uint16_t pdpt_idx = (uint16_t)((vaddr >> 30) & 0x1FF);
+    uint16_t pd_idx = (uint16_t)((vaddr >> 21) & 0x1FF);
+
+    uint64_t pml4e = read_pte((void *)pml4, pml4_idx);
+    if ((pml4e & 1) == 0) {
+        return 0;
+    }
+    uint64_t pdpt = pml4e & ~0xFFFULL;
+    uint64_t pdpte = read_pte((void *)pdpt, pdpt_idx);
+    if ((pdpte & 1) == 0) {
+        return 0;
+    }
+    uint64_t pd = pdpte & ~0xFFFULL;
+    uint64_t pde = read_pte((void *)pd, pd_idx);
+    if ((pde & 1) == 0 || (pde & (1u << 7))) {
+        return 0;
+    }
+    return (uint64_t *)(uintptr_t)(pde & ~0xFFFULL);
+}
+
+static int map_page_4k(uint64_t vaddr, uint64_t paddr, uint64_t flags) {
+    uint64_t *pt = get_pt_for(vaddr);
+    if (!pt) {
+        return 0;
+    }
+    uint16_t pt_idx = (uint16_t)((vaddr >> 12) & 0x1FF);
+    pt[pt_idx] = (paddr & ~0xFFFULL) | (flags & 0xFFFULL);
+    invlpg((void *)(uintptr_t)vaddr);
     return 1;
 }
 
@@ -743,6 +793,44 @@ static void map_mmio_2m(uint64_t phys) {
     uint16_t idx = (uint16_t)((base >> 21) & 0x1FF);
     pd_apic[idx] = base | 0x083;
     invlpg((void *)(uintptr_t)base);
+}
+
+static void init_kernel_heap(void) {
+    uint64_t pdpt = PDPT_BASE_ADDR;
+    uint64_t pdpt_entry = read_pte((void *)pdpt, 0);
+    if ((pdpt_entry & 1) == 0) {
+        return;
+    }
+    uint64_t pd = pdpt_entry & ~0xFFFULL;
+    uint64_t pd_idx = (HEAP_BASE >> 21) & 0x1FF;
+    if (read_pte((void *)pd, (uint16_t)pd_idx) & (1u << 7)) {
+        return;
+    }
+    uint64_t pt = PD_BASE_ADDR + 0x1000;
+    write_pte((void *)pd, (uint16_t)pd_idx, (pt & ~0xFFFULL) | 0x003);
+
+    uint64_t heap_phys = 0x00100000ULL;
+    for (uint32_t i = 0; i < HEAP_PAGES; ++i) {
+        uint64_t vaddr = HEAP_BASE + (uint64_t)i * PAGE_SIZE;
+        uint64_t paddr = heap_phys + (uint64_t)i * PAGE_SIZE;
+        map_page_4k(vaddr, paddr, 0x003);
+    }
+    heap_brk = (uint8_t *)(uintptr_t)HEAP_BASE;
+    heap_enabled = 1;
+}
+
+static void *kmalloc(size_t size) {
+    if (!heap_enabled || size == 0) {
+        return 0;
+    }
+    size = (size + 15) & ~((size_t)15);
+    uint8_t *cur = heap_brk;
+    uint64_t end = HEAP_BASE + (uint64_t)HEAP_PAGES * PAGE_SIZE;
+    if ((uint64_t)(uintptr_t)(cur + size) > end) {
+        return 0;
+    }
+    heap_brk = cur + size;
+    return cur;
 }
 
 static void acpi_parse(void) {
@@ -1781,6 +1869,7 @@ void kmain(const barecore_boot_info_t *boot_info) {
     write_cstr("long mode: OK\n");
 
     acpi_parse();
+    init_kernel_heap();
 
     init_idt();
     lapic_init();
