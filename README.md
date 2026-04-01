@@ -111,6 +111,7 @@ Implemented syscalls:
 - `yield`
 - `fork` (simplified)
 - `exec` (simplified)
+- `wait` (wait for child exit)
 
 ### Console and Graphics
 - serial output (`COM1`) for debugging/CI
@@ -133,6 +134,7 @@ Keyboard-driven shell commands:
 - `clear`
 - `pid`
 - `sleep <ms>`
+- `wait [pid]`
 - `lsdisk`
 - `lsdisk <path>`
 - `catdisk <path>`

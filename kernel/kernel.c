@@ -41,6 +41,7 @@
 #define SYS_YIELD   5
 #define SYS_FORK    6
 #define SYS_EXEC    7
+#define SYS_WAIT    8
 #define MSR_EFER    0xC0000080u
 #define MSR_STAR    0xC0000081u
 #define MSR_LSTAR   0xC0000082u
@@ -154,6 +155,9 @@ typedef struct {
     uint64_t rsp;
     task_state_t state;
     uint64_t wake_tick;
+    int parent_pid;
+    int wait_reaped;
+    int exit_code;
     const char *name;
     void (*entry)(void);
 } task_t;
@@ -1272,12 +1276,23 @@ static void schedule(void) {
     }
 }
 
+static int alloc_task_slot(void) {
+    if (task_count < MAX_TASKS) {
+        return task_count++;
+    }
+    for (int i = 0; i < task_count; ++i) {
+        if (tasks[i].state == TASK_EXITED && tasks[i].wait_reaped) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 static int create_task(void (*entry)(void), const char *name) {
-    if (task_count >= MAX_TASKS) {
+    int idx = alloc_task_slot();
+    if (idx < 0) {
         return -1;
     }
-
-    int idx = task_count++;
     uint64_t *sp = (uint64_t *)(task_stacks[idx] + STACK_SIZE);
 
     *--sp = (uint64_t)entry;
@@ -1292,6 +1307,9 @@ static int create_task(void (*entry)(void), const char *name) {
     tasks[idx].rsp = (uint64_t)sp;
     tasks[idx].state = TASK_RUNNABLE;
     tasks[idx].wake_tick = 0;
+    tasks[idx].parent_pid = 0;
+    tasks[idx].wait_reaped = 0;
+    tasks[idx].exit_code = 0;
     tasks[idx].name = name;
     tasks[idx].entry = entry;
     return idx;
@@ -1326,7 +1344,11 @@ static int task_fork_simple(void) {
     }
     task_t *parent = &tasks[current_task];
     int child = create_task(parent->entry, parent->name);
-    return (child < 0) ? -1 : tasks[child].pid;
+    if (child < 0) {
+        return -1;
+    }
+    tasks[child].parent_pid = parent->pid;
+    return tasks[child].pid;
 }
 
 static int current_pid(void) {
@@ -1336,9 +1358,64 @@ static int current_pid(void) {
     return tasks[current_task].pid;
 }
 
+static int find_task_index_by_pid(int pid) {
+    for (int i = 0; i < task_count; ++i) {
+        if (tasks[i].pid == pid) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void wake_waiting_parent(int parent_pid) {
+    int pidx = find_task_index_by_pid(parent_pid);
+    if (pidx < 0) {
+        return;
+    }
+    if (tasks[pidx].state == TASK_SLEEPING && tasks[pidx].wake_tick == ~0ULL) {
+        tasks[pidx].state = TASK_RUNNABLE;
+        tasks[pidx].wake_tick = 0;
+    }
+}
+
+static long ksys_wait(int pid) {
+    int self = current_pid();
+    if (self == 0) {
+        return -1;
+    }
+
+    for (;;) {
+        int has_child = 0;
+        for (int i = 0; i < task_count; ++i) {
+            if (tasks[i].parent_pid != self) {
+                continue;
+            }
+            if (pid > 0 && tasks[i].pid != pid) {
+                continue;
+            }
+            has_child = 1;
+            if (tasks[i].state == TASK_EXITED && !tasks[i].wait_reaped) {
+                tasks[i].wait_reaped = 1;
+                return tasks[i].pid;
+            }
+        }
+        if (!has_child) {
+            return -1;
+        }
+        if (current_task >= 0 && current_task < task_count) {
+            tasks[current_task].state = TASK_SLEEPING;
+            tasks[current_task].wake_tick = ~0ULL;
+        }
+        schedule();
+    }
+}
+
 static void task_exit_now(void) {
     if (current_task >= 0 && current_task < task_count) {
+        int parent = tasks[current_task].parent_pid;
         tasks[current_task].state = TASK_EXITED;
+        tasks[current_task].exit_code = 0;
+        wake_waiting_parent(parent);
     }
     schedule();
     for (;;) {
@@ -1393,6 +1470,10 @@ static void userspace_sleep(uint64_t ms) {
     (void)ksys_sleep(ms);
 }
 
+static long userspace_wait(int pid) {
+    return ksys_wait(pid);
+}
+
 static void userspace_exit(void) {
     (void)ksys_exit();
 }
@@ -1422,7 +1503,7 @@ static int str_starts_with(const char *s, const char *prefix) {
 }
 
 static void shell_cmd_help(void) {
-    userspace_write("commands: help ls cat echo clear pid sleep lsdisk catdisk runelf fork exec userdemo userpreempt pciscan\n");
+    userspace_write("commands: help ls cat echo clear pid sleep wait lsdisk catdisk runelf fork exec userdemo userpreempt pciscan\n");
 }
 
 static void shell_cmd_ls(void) {
@@ -1657,6 +1738,12 @@ void syscall_dispatch(regs_t *regs) {
         schedule();
         regs->rax = 0;
         break;
+    case SYS_FORK:
+        regs->rax = (uint64_t)task_fork_simple();
+        break;
+    case SYS_WAIT:
+        regs->rax = (uint64_t)ksys_wait((int)regs->rdi);
+        break;
     default:
         regs->rax = (uint64_t)-1;
         break;
@@ -1741,53 +1828,6 @@ static uint32_t fat_next_cluster(uint32_t cluster) {
         return next;
     }
     return (uint16_t)fat_sector[ent_offset] | ((uint16_t)fat_sector[ent_offset + 1] << 8);
-}
-
-static int fat_read_root_entry(const char *name, uint32_t *start_cluster, uint32_t *size) {
-    if (!fat_fs.valid) {
-        return 0;
-    }
-    char target[11];
-    for (int i = 0; i < 11; ++i) {
-        target[i] = ' ';
-    }
-    int idx = 0;
-    for (const char *p = name; *p && idx < 11; ++p) {
-        if (*p == '.') {
-            idx = 8;
-            continue;
-        }
-        target[idx++] = (*p >= 'a' && *p <= 'z') ? (char)(*p - 32) : *p;
-    }
-
-    for (uint32_t s = 0; s < fat_fs.root_dir_sectors; ++s) {
-        if (!ata_read_sector(fat_fs.root_start_lba + s, fat_sector)) {
-            return 0;
-        }
-        for (int i = 0; i < 16; ++i) {
-            uint8_t *ent = &fat_sector[i * 32];
-            if (ent[0] == 0x00) {
-                return 0;
-            }
-            if (ent[0] == 0xE5 || ent[11] == 0x0F) {
-                continue;
-            }
-            int match = 1;
-            for (int j = 0; j < 11; ++j) {
-                if (ent[j] != (uint8_t)target[j]) {
-                    match = 0;
-                    break;
-                }
-            }
-            if (!match) {
-                continue;
-            }
-            *start_cluster = (uint16_t)(ent[26] | (ent[27] << 8));
-            *size = (uint32_t)(ent[28] | (ent[29] << 8) | (ent[30] << 16) | (ent[31] << 24));
-            return 1;
-        }
-    }
-    return 0;
 }
 
 static int fat_format_name(const char *name, char out[11]) {
@@ -2226,6 +2266,26 @@ static void shell_exec(char *line) {
             p++;
         }
         userspace_sleep(ms);
+        return;
+    }
+    if (str_equal(line, "wait")) {
+        long pid = userspace_wait(-1);
+        userspace_write("wait -> pid=");
+        write_u64_hex((uint64_t)pid);
+        userspace_write("\n");
+        return;
+    }
+    if (str_starts_with(line, "wait ")) {
+        int target = 0;
+        const char *p = line + 5;
+        while (*p >= '0' && *p <= '9') {
+            target = target * 10 + (int)(*p - '0');
+            p++;
+        }
+        long pid = userspace_wait(target);
+        userspace_write("wait -> pid=");
+        write_u64_hex((uint64_t)pid);
+        userspace_write("\n");
         return;
     }
     if (str_starts_with(line, "cat ")) {
