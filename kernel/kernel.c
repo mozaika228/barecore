@@ -24,6 +24,8 @@
 
 #define COM1_PORT    0x3F8
 #define QEMU_EXIT_PORT 0xF4
+#define PCI_CONFIG_ADDRESS 0xCF8
+#define PCI_CONFIG_DATA    0xCFC
 
 #define VECTOR_DIVIDE      0
 #define VECTOR_PAGE_FAULT  14
@@ -355,6 +357,16 @@ static inline uint16_t inw(uint16_t port) {
     return value;
 }
 
+static inline uint32_t inl(uint16_t port) {
+    uint32_t value;
+    __asm__ volatile("inl %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+
+static inline void outl(uint16_t port, uint32_t value) {
+    __asm__ volatile("outl %0, %1" : : "a"(value), "Nd"(port));
+}
+
 static inline void io_wait(void) {
     __asm__ volatile("outb %%al, $0x80" : : "a"(0));
 }
@@ -458,6 +470,14 @@ static void serial_put_char(char c) {
         spin--;
     }
     outb(COM1_PORT, (uint8_t)c);
+}
+
+static void write_hex_u32(uint32_t v) {
+    for (int i = 7; i >= 0; --i) {
+        uint8_t digit = (uint8_t)((v >> (i * 4)) & 0xF);
+        char c = (digit < 10) ? (char)('0' + digit) : (char)('A' + (digit - 10));
+        put_char(c);
+    }
 }
 
 static void fb_put_pixel(uint32_t x, uint32_t y, uint32_t color) {
@@ -854,6 +874,52 @@ static void *kmalloc(size_t size) {
     }
     heap_brk = cur + size;
     return cur;
+}
+
+static uint32_t pci_read_config_dword(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
+    uint32_t address = (1u << 31) |
+                       ((uint32_t)bus << 16) |
+                       ((uint32_t)slot << 11) |
+                       ((uint32_t)func << 8) |
+                       (offset & 0xFC);
+    outl(PCI_CONFIG_ADDRESS, address);
+    return inl(PCI_CONFIG_DATA);
+}
+
+static void pci_dump_devices(void) {
+    userspace_write("pci: scan\n");
+    for (uint8_t bus = 0; bus < 64; ++bus) {
+        for (uint8_t slot = 0; slot < 32; ++slot) {
+            uint32_t id = pci_read_config_dword(bus, slot, 0, 0x00);
+            if (id == 0xFFFFFFFFu) {
+                continue;
+            }
+            uint16_t vendor = (uint16_t)(id & 0xFFFF);
+            uint16_t device = (uint16_t)(id >> 16);
+            if (vendor == 0xFFFF) {
+                continue;
+            }
+            uint32_t class_reg = pci_read_config_dword(bus, slot, 0, 0x08);
+            uint8_t class_code = (uint8_t)(class_reg >> 24);
+            uint8_t subclass = (uint8_t)(class_reg >> 16);
+            uint8_t prog_if = (uint8_t)(class_reg >> 8);
+            userspace_write("bus=");
+            write_u64_hex(bus);
+            userspace_write(" slot=");
+            write_u64_hex(slot);
+            userspace_write(" ven=");
+            write_hex_u32(vendor);
+            userspace_write(" dev=");
+            write_hex_u32(device);
+            userspace_write(" class=");
+            write_hex_u32(class_code);
+            userspace_write(" sub=");
+            write_hex_u32(subclass);
+            userspace_write(" pi=");
+            write_hex_u32(prog_if);
+            userspace_write("\n");
+        }
+    }
 }
 
 static void acpi_parse(void) {
@@ -1286,7 +1352,7 @@ static int str_starts_with(const char *s, const char *prefix) {
 }
 
 static void shell_cmd_help(void) {
-    userspace_write("commands: help ls cat echo clear pid sleep lsdisk catdisk fork exec userdemo userpreempt\n");
+    userspace_write("commands: help ls cat echo clear pid sleep lsdisk catdisk fork exec userdemo userpreempt pciscan\n");
 }
 
 static void shell_cmd_ls(void) {
@@ -2009,6 +2075,10 @@ static void shell_exec(char *line) {
     }
     if (str_starts_with(line, "catdisk ")) {
         shell_cmd_catdisk(line + 8);
+        return;
+    }
+    if (str_equal(line, "pciscan")) {
+        pci_dump_devices();
         return;
     }
     if (str_starts_with(line, "sleep ")) {
