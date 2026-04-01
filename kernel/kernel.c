@@ -53,6 +53,8 @@
 #define GDT_USER_CODE   0x20
 #define GDT_TSS         0x28
 #define USER_STACK_TOP  0x00080000u
+#define USER_IMAGE_BASE 0x00020000u
+#define USER_IMAGE_END  0x00078000u
 
 #define LAPIC_DEFAULT_BASE 0xFEE00000u
 #define HPET_DEFAULT_BASE  0xFED00000u
@@ -1557,7 +1559,7 @@ static int str_starts_with(const char *s, const char *prefix) {
 }
 
 static void shell_cmd_help(void) {
-    userspace_write("commands: help ls cat echo clear pid sleep wait memstat memtest lsdisk catdisk runelf fork exec userdemo userpreempt pciscan\n");
+    userspace_write("commands: help ls cat echo clear pid sleep wait memstat memtest lsdisk catdisk runelf runuser fork exec userdemo userpreempt pciscan\n");
 }
 
 static void shell_cmd_ls(void) {
@@ -2222,6 +2224,61 @@ static int elf_load_image(const uint8_t *buf, uint32_t len, uint64_t *entry_out)
     return 1;
 }
 
+static int elf_load_user_image(const uint8_t *buf, uint32_t len, uint64_t *entry_out) {
+    if (len < sizeof(elf64_ehdr_t)) {
+        return 0;
+    }
+    const elf64_ehdr_t *eh = (const elf64_ehdr_t *)buf;
+    if (eh->magic != 0x464C457Fu) {
+        return 0;
+    }
+    if (eh->bit_class != 2 || eh->endian != 1 || eh->ident_ver != 1) {
+        return 0;
+    }
+    if (eh->type != 2 || eh->machine != 0x3E || eh->phentsize != sizeof(elf64_phdr_t)) {
+        return 0;
+    }
+    if ((uint64_t)eh->phoff + (uint64_t)eh->phnum * sizeof(elf64_phdr_t) > len) {
+        return 0;
+    }
+    if (eh->entry < USER_IMAGE_BASE || eh->entry >= USER_IMAGE_END) {
+        return 0;
+    }
+
+    for (uint16_t i = 0; i < eh->phnum; ++i) {
+        const elf64_phdr_t *ph = (const elf64_phdr_t *)(buf + eh->phoff + (uint64_t)i * sizeof(elf64_phdr_t));
+        if (ph->type != 1) {
+            continue;
+        }
+        if (ph->filesz > ph->memsz) {
+            return 0;
+        }
+        if ((uint64_t)ph->offset + ph->filesz > len) {
+            return 0;
+        }
+        if (ph->vaddr < USER_IMAGE_BASE || (ph->vaddr + ph->memsz) > USER_IMAGE_END) {
+            return 0;
+        }
+    }
+
+    for (uint16_t i = 0; i < eh->phnum; ++i) {
+        const elf64_phdr_t *ph = (const elf64_phdr_t *)(buf + eh->phoff + (uint64_t)i * sizeof(elf64_phdr_t));
+        if (ph->type != 1) {
+            continue;
+        }
+        uint8_t *dst = (uint8_t *)(uintptr_t)ph->vaddr;
+        const uint8_t *src = buf + ph->offset;
+        for (uint64_t j = 0; j < ph->filesz; ++j) {
+            dst[j] = src[j];
+        }
+        for (uint64_t j = ph->filesz; j < ph->memsz; ++j) {
+            dst[j] = 0;
+        }
+    }
+    *entry_out = eh->entry;
+    return 1;
+}
+
 static void shell_cmd_runelf(const char *path) {
     if (!fat_fs.valid) {
         userspace_write("disk fs: not detected\n");
@@ -2251,6 +2308,38 @@ static void shell_cmd_runelf(const char *path) {
     userspace_write("runelf: jumping to entry\n");
     void (*entry_fn)(void) = (void (*)(void))(uintptr_t)entry;
     entry_fn();
+}
+
+static void shell_cmd_runuser(const char *path) {
+    if (!fat_fs.valid) {
+        userspace_write("disk fs: not detected\n");
+        return;
+    }
+    uint32_t cluster = 0;
+    uint32_t size = 0;
+    uint8_t attr = 0;
+    if (!fat_resolve_path(path, &cluster, &size, &attr) || (attr & 0x10)) {
+        userspace_write("runuser: not found\n");
+        return;
+    }
+    if (size >= sizeof(elf_buffer)) {
+        userspace_write("runuser: too large\n");
+        return;
+    }
+    uint32_t out_size = 0;
+    if (!fat_read_file_by_cluster(cluster, size, elf_buffer, sizeof(elf_buffer) - 1, &out_size)) {
+        userspace_write("runuser: read error\n");
+        return;
+    }
+    uint64_t entry = 0;
+    if (!elf_load_user_image(elf_buffer, out_size, &entry)) {
+        userspace_write("runuser: invalid user ELF/range\n");
+        return;
+    }
+    ring3_enabled = 0;
+    current_user = -1;
+    userspace_write("runuser: entering ring3\n");
+    enter_user_mode((void (*)(void))(uintptr_t)entry, USER_STACK_TOP);
 }
 
 static void shell_cmd_lsdisk(void) {
@@ -2352,6 +2441,10 @@ static void shell_exec(char *line) {
     }
     if (str_starts_with(line, "runelf ")) {
         shell_cmd_runelf(line + 7);
+        return;
+    }
+    if (str_starts_with(line, "runuser ")) {
+        shell_cmd_runuser(line + 8);
         return;
     }
     if (str_equal(line, "pciscan")) {

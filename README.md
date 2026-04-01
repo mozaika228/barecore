@@ -131,6 +131,7 @@ Implemented syscalls:
 - on-disk FAT12/16 reader via ATA PIO:
   - `lsdisk`
   - `catdisk <FILE>`
+  - user ELF read path for `runuser`
 
 ### Shell
 Keyboard-driven shell commands:
@@ -148,6 +149,7 @@ Keyboard-driven shell commands:
 - `lsdisk <path>`
 - `catdisk <path>`
 - `runelf <path>`
+- `runuser <path>` (load ELF into user range and jump ring3)
 - `pciscan`
 - `fork`
 - `exec <a|b|shell>`
