@@ -363,7 +363,12 @@ static uint8_t hpet_irq = 2;
 static uint8_t ioapic_enabled = 0;
 static uint8_t acpi_enabled = 0;
 static uint8_t heap_enabled = 0;
-static uint8_t *heap_brk = (uint8_t *)(uintptr_t)HEAP_BASE;
+typedef struct heap_block {
+    uint64_t size;
+    uint8_t free;
+    struct heap_block *next;
+} heap_block_t;
+static heap_block_t *heap_head = 0;
 static uint8_t sched_preempt = 0;
 static uint64_t sched_quantum = 5;
 static uint8_t syscall_enabled = 0;
@@ -919,7 +924,10 @@ static void init_kernel_heap(void) {
         uint64_t paddr = heap_phys + (uint64_t)i * PAGE_SIZE;
         map_page_4k(vaddr, paddr, 0x003);
     }
-    heap_brk = (uint8_t *)(uintptr_t)HEAP_BASE;
+    heap_head = (heap_block_t *)(uintptr_t)HEAP_BASE;
+    heap_head->size = (uint64_t)HEAP_PAGES * PAGE_SIZE - sizeof(heap_block_t);
+    heap_head->free = 1;
+    heap_head->next = 0;
     heap_enabled = 1;
 }
 
@@ -940,14 +948,60 @@ static void *kmalloc(size_t size) {
     if (!heap_enabled || size == 0) {
         return 0;
     }
-    size = (size + 15) & ~((size_t)15);
-    uint8_t *cur = heap_brk;
-    uint64_t end = HEAP_BASE + (uint64_t)HEAP_PAGES * PAGE_SIZE;
-    if ((uint64_t)(uintptr_t)(cur + size) > end) {
-        return 0;
+    size = (size + 15u) & ~((size_t)15u);
+    heap_block_t *blk = heap_head;
+    while (blk) {
+        if (blk->free && blk->size >= size) {
+            uint64_t remain = blk->size - size;
+            if (remain > sizeof(heap_block_t) + 16u) {
+                heap_block_t *n = (heap_block_t *)((uint8_t *)(blk + 1) + size);
+                n->size = remain - sizeof(heap_block_t);
+                n->free = 1;
+                n->next = blk->next;
+                blk->next = n;
+                blk->size = size;
+            }
+            blk->free = 0;
+            return (void *)(blk + 1);
+        }
+        blk = blk->next;
     }
-    heap_brk = cur + size;
-    return cur;
+    return 0;
+}
+
+static void kfree(void *ptr) {
+    if (!ptr || !heap_enabled) {
+        return;
+    }
+    heap_block_t *blk = ((heap_block_t *)ptr) - 1;
+    blk->free = 1;
+
+    heap_block_t *it = heap_head;
+    while (it && it->next) {
+        uint8_t *end = (uint8_t *)(it + 1) + it->size;
+        if (it->free && it->next->free && end == (uint8_t *)it->next) {
+            it->size += sizeof(heap_block_t) + it->next->size;
+            it->next = it->next->next;
+            continue;
+        }
+        it = it->next;
+    }
+}
+
+static void heap_stats(uint64_t *free_bytes, uint64_t *used_bytes, uint64_t *free_blocks, uint64_t *used_blocks) {
+    *free_bytes = 0;
+    *used_bytes = 0;
+    *free_blocks = 0;
+    *used_blocks = 0;
+    for (heap_block_t *b = heap_head; b; b = b->next) {
+        if (b->free) {
+            *free_bytes += b->size;
+            (*free_blocks)++;
+        } else {
+            *used_bytes += b->size;
+            (*used_blocks)++;
+        }
+    }
 }
 
 static uint32_t pci_read_config_dword(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
@@ -1503,7 +1557,7 @@ static int str_starts_with(const char *s, const char *prefix) {
 }
 
 static void shell_cmd_help(void) {
-    userspace_write("commands: help ls cat echo clear pid sleep wait lsdisk catdisk runelf fork exec userdemo userpreempt pciscan\n");
+    userspace_write("commands: help ls cat echo clear pid sleep wait memstat memtest lsdisk catdisk runelf fork exec userdemo userpreempt pciscan\n");
 }
 
 static void shell_cmd_ls(void) {
@@ -1521,6 +1575,44 @@ static void shell_cmd_cat(const char *name) {
         }
     }
     userspace_write("cat: not found\n");
+}
+
+static void shell_cmd_memstat(void) {
+    uint64_t free_bytes, used_bytes, free_blocks, used_blocks;
+    if (!heap_enabled || !heap_head) {
+        userspace_write("heap: disabled\n");
+        return;
+    }
+    heap_stats(&free_bytes, &used_bytes, &free_blocks, &used_blocks);
+    userspace_write("heap used=");
+    write_u64_hex(used_bytes);
+    userspace_write(" free=");
+    write_u64_hex(free_bytes);
+    userspace_write(" used_blks=");
+    write_u64_hex(used_blocks);
+    userspace_write(" free_blks=");
+    write_u64_hex(free_blocks);
+    userspace_write("\n");
+}
+
+static void shell_cmd_memtest(void) {
+    void *a = kmalloc(128);
+    void *b = kmalloc(256);
+    void *c = kmalloc(64);
+    if (!a || !b || !c) {
+        userspace_write("memtest: alloc failed\n");
+        return;
+    }
+    kfree(b);
+    kfree(a);
+    void *d = kmalloc(300);
+    if (!d) {
+        userspace_write("memtest: reuse failed\n");
+        return;
+    }
+    kfree(c);
+    kfree(d);
+    userspace_write("memtest: ok\n");
 }
 
 static void shell_exec(char *line);
@@ -2236,6 +2328,14 @@ static void shell_exec(char *line) {
         userspace_write("pid=");
         write_u64_hex((uint64_t)userspace_getpid());
         userspace_write("\n");
+        return;
+    }
+    if (str_equal(line, "memstat")) {
+        shell_cmd_memstat();
+        return;
+    }
+    if (str_equal(line, "memtest")) {
+        shell_cmd_memtest();
         return;
     }
     if (str_equal(line, "lsdisk")) {

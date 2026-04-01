@@ -97,6 +97,13 @@ BIOS kernel loader constraint:
 - simplified `fork` (spawns a new task from current entry)
 - simplified `exec` (replaces current task entry)
 
+### Memory
+- kernel heap over mapped 4K pages
+- `kmalloc`/`kfree` (first-fit, split, coalesce)
+- shell diagnostics:
+  - `memstat`
+  - `memtest`
+
 ### Syscalls
 ABI (current, ring3 via `syscall`, fallback `int 0x80`):
 - `rax`: syscall number
@@ -135,6 +142,8 @@ Keyboard-driven shell commands:
 - `pid`
 - `sleep <ms>`
 - `wait [pid]`
+- `memstat`
+- `memtest`
 - `lsdisk`
 - `lsdisk <path>`
 - `catdisk <path>`
