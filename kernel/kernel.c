@@ -649,6 +649,11 @@ static void init_pic(uint8_t mask_timer) {
     outb(PIC2_DATA, 0xFF);
 }
 
+static void disable_pic(void) {
+    outb(PIC1_DATA, 0xFF);
+    outb(PIC2_DATA, 0xFF);
+}
+
 static void init_pit(uint32_t hz) {
     uint32_t divisor = 1193182U / hz;
     outb(PIT_COMMAND, 0x36);
@@ -1341,7 +1346,11 @@ void irq_keyboard_handler(regs_t *regs) {
         }
     }
 
-    outb(PIC1_COMMAND, PIC_EOI);
+    if (apic_enabled) {
+        lapic_eoi();
+    } else {
+        outb(PIC1_COMMAND, PIC_EOI);
+    }
 }
 
 void exception_divide_handler(regs_t *regs) {
@@ -1780,9 +1789,15 @@ void kmain(const barecore_boot_info_t *boot_info) {
     if (hpet_enabled && ioapic_enabled) {
         hpet_enable_interrupt();
         hpet_set_periodic_ms(10);
-        init_pic(1);
+        ioapic_set_irq(1, VECTOR_KEYBOARD);
+        disable_pic();
     } else {
-        init_pic(apic_enabled ? 1 : 0);
+        if (ioapic_enabled) {
+            ioapic_set_irq(1, VECTOR_KEYBOARD);
+            disable_pic();
+        } else {
+            init_pic(apic_enabled ? 1 : 0);
+        }
         if (!apic_enabled) {
             init_pit(PIT_HZ);
         }
