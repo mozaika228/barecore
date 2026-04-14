@@ -1,7 +1,37 @@
 # barecore
 [![CI](https://github.com/mozaika228/barecore/actions/workflows/ci.yml/badge.svg)](https://github.com/mozaika228/barecore/actions/workflows/ci.yml)
 
-`barecore` is a low-level x86_64 OS project with an ASM boot path and a C kernel.
+> Minimal x86_64 operating system from scratch (ASM bootloader -> C kernel -> userspace)
+
+`barecore` is a fully custom OS that boots from BIOS/UEFI, enters long mode, and runs its own scheduler, syscalls, and shell without relying on existing kernels.
+
+## Why barecore?
+
+- Built completely from scratch (bootloader -> kernel -> userspace)
+- Demonstrates real x86_64 internals (paging, interrupts, syscalls)
+- Includes scheduler, memory allocator, filesystem path handling, and shell
+- Runs on QEMU with BIOS and UEFI boot paths
+- Designed as a learning and experimentation platform for OS development
+
+## What you'll see
+
+After boot:
+- kernel initializes
+- scheduler starts tasks
+- interactive shell appears
+
+Example runtime output:
+
+```text
+barecore kernel (production path)
+long mode: OK
+scheduler: round-robin
+drivers: HPET+IOAPIC timer + PS/2 keyboard
+syscalls: write exit getpid sleep yield
+
+[bcore shell] type 'help'
+$ 
+```
 
 ## Architecture Overview
 
