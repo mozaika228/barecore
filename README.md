@@ -3,20 +3,25 @@
 
 > Minimal x86_64 operating system from scratch (ASM bootloader -> C kernel -> userspace)
 
-`barecore` is a fully custom OS that boots from BIOS/UEFI, enters long mode, and runs its own scheduler, syscalls, and shell without relying on existing kernels.
+`barecore` is a custom OS where we control the full path: bootloader, mode transitions, paging, interrupts, scheduler, syscalls, filesystem access, and shell.
 
-## Why barecore?
+## Why this project matters
 
-- Built completely from scratch (bootloader -> kernel -> userspace)
-- Demonstrates real x86_64 internals (paging, interrupts, syscalls)
-- Includes scheduler, memory allocator, filesystem path handling, and shell
-- Runs on QEMU with BIOS and UEFI boot paths
-- Designed as a learning and experimentation platform for OS development
+- It shows how a computer boots and runs software without relying on an existing kernel.
+- It is a real low-level system, not a toy parser or emulator-only script.
+- It connects theory (GDT/IDT/paging/syscalls) to observable runtime behavior.
+- It is built for learning, debugging, and experimentation on real x86_64 concepts.
+
+## Project level
+
+`barecore` is a serious mini-OS codebase.  
+If you are a student, this is the level of: "I understand how OS fundamentals actually work on hardware."
 
 ## What you'll see
 
 After boot:
 - kernel initializes
+- timer and interrupts are configured
 - scheduler starts tasks
 - interactive shell appears
 
@@ -33,160 +38,27 @@ syscalls: write exit getpid sleep yield
 $ 
 ```
 
-## Architecture Overview
+## Architecture at a glance
 
-```text
-BIOS boot flow
---------------
-boot/boot.asm (16-bit, 512 bytes, @0x7C00)
-  -> loads boot/stage2.asm from disk
-  -> transfers control to stage2
-
-boot/stage2.asm
-  real mode:
-    - A20 enable
-    - kernel.bin read via INT 13h extensions
-  protected mode:
-    - GDT load
-    - CR0.PE=1
-  long mode transition:
-    - 4-level paging setup (PML4/PDPT/PD, identity map)
-    - CR4.PAE=1, EFER.LME=1, CR0.PG=1
-    - far jump to 64-bit code
-  -> jump to kernel entry @ 0x00100000
-
-kernel/kernel_entry.asm
-  - _start (64-bit)
-  - IDT loader helper
-  - context switch primitive
-  - ISR stubs for:
-      #DE, #PF, IRQ0(timer), IRQ1(keyboard), int 0x80/syscall
-
-kernel/kernel.c
-  - console (serial + VGA / framebuffer fallback)
-  - exceptions and IRQ handlers
-  - scheduler and task model
-  - syscalls and mini-shell
-  - in-memory initrd-like file table
+```mermaid
+flowchart LR
+    A[BIOS/UEFI] --> B[boot/boot.asm]
+    B --> C[boot/stage2.asm]
+    C --> D[16-bit real mode]
+    D --> E[32-bit protected mode]
+    E --> F[64-bit long mode]
+    F --> G[kernel_entry.asm]
+    G --> H[kernel.c]
+    H --> I[scheduler + syscalls + shell]
 ```
 
-## GDT/IDT Layout
+Mode transitions:
 
-### GDT
-- stage2: minimal 32/64-bit segments for mode transition
-- kernel: full 64-bit GDT with:
-  - kernel code/data
-  - user code/data (ring3)
-  - TSS descriptor (RSP0 stack)
+```text
+real mode -> protected mode -> long mode -> kernel runtime -> ring3 demos/userspace
+```
 
-### IDT (configured in `kernel/kernel.c`)
-- `0`: divide-by-zero (`#DE`)
-- `14`: page fault (`#PF`)
-- `32`: timer IRQ0 (APIC or PIT fallback)
-- `33`: PS/2 keyboard IRQ1
-- `0x80`: syscall trap
-
-## Memory Map
-
-Key regions (BIOS path):
-- `0x00007C00`: stage1 boot sector
-- `0x00008000`: stage2 loader
-- `0x00090000`: PML4
-- `0x00091000`: PDPT
-- `0x00092000`: PD (identity map)
-- `0x00093000`: PD for LAPIC mapping
-- `0xFED00000`: HPET MMIO (mapped)
-- `0xFEE00000`: LAPIC MMIO (mapped)
-- `0x00100000`: kernel image load address
-- `0x00200000`: kernel bootstrap stack top
-- `0x000B8000`: VGA text buffer (BIOS console fallback)
-
-BIOS kernel loader constraint:
-- fixed `KERNEL_SECTORS=128` in both:
-  - `boot/stage2.asm`
-  - `Makefile`
-
-## Kernel Features
-
-### Interrupts and Exceptions
-- ACPI RSDP + MADT/HPET parsing (LAPIC/IOAPIC/HPET addresses)
-- APIC timer (fallback to PIT), HPET+IOAPIC interrupt path when available
-- PS/2 keyboard IRQ (`IRQ1`)
-- divide-by-zero handler with explicit panic message
-- page-fault handler with fault address (`CR2`) and decoded error bits
-- unified panic path with register/frame dump + simple backtrace
-
-### Scheduler and Processes
-- context switch in ASM (`switch_context`)
-- round-robin scheduler in C
-- sleep/wake based on PIT ticks
-- three tasks by default:
-  - `task_a` (prints `A`)
-  - `task_b` (prints `B`)
-  - `task_shell` (interactive shell)
-- simplified `fork` (spawns a new task from current entry)
-- simplified `exec` (replaces current task entry)
-
-### Memory
-- kernel heap over mapped 4K pages
-- `kmalloc`/`kfree` (first-fit, split, coalesce)
-- shell diagnostics:
-  - `memstat`
-  - `memtest`
-
-### Syscalls
-ABI (current, ring3 via `syscall`, fallback `int 0x80`):
-- `rax`: syscall number
-- `rdi`, `rsi`: args 0..1
-- return in `rax`
-
-Implemented syscalls:
-- `write`
-- `exit`
-- `getpid`
-- `sleep`
-- `yield`
-- `fork` (simplified)
-- `exec` (simplified)
-- `wait` (wait for child exit)
-
-### Console and Graphics
-- serial output (`COM1`) for debugging/CI
-- VGA text mode (`0xB8000`) on BIOS path
-- framebuffer fallback on UEFI path (GOP metadata from `uefi/bootx64.c`)
-- pixel primitive API in kernel (`fb_put_pixel`)
-
-### Filesystem
-- in-memory initrd-like table for `ls` / `cat`
-- on-disk FAT12/16 reader via ATA PIO:
-  - `lsdisk`
-  - `catdisk <FILE>`
-  - user ELF read path for `runuser`
-
-### Shell
-Keyboard-driven shell commands:
-- `help`
-- `ls`
-- `cat <file>`
-- `echo <text>`
-- `clear`
-- `pid`
-- `sleep <ms>`
-- `wait [pid]`
-- `memstat`
-- `memtest`
-- `lsdisk`
-- `lsdisk <path>`
-- `catdisk <path>`
-- `runelf <path>`
-- `runuser <path>` (load ELF into user range and jump ring3)
-- `pciscan`
-- `fork`
-- `exec <a|b|shell>`
-- `userdemo` (ring3 transition demo)
-- `userpreempt` (ring3 preemptive scheduler demo)
-
-## Build & Run
+## Quick start
 
 ### Dependencies (Linux)
 
@@ -204,18 +76,13 @@ sudo apt-get install -y \
 make CROSS=x86_64-linux-gnu-
 ```
 
-Output:
-- `build/kernel.elf`
-- `build/kernel.bin`
-- `build/os.img`
-
 ### Run BIOS image
 
 ```bash
 make CROSS=x86_64-linux-gnu- run
 ```
 
-Or:
+Alternative launcher:
 
 ```bash
 scripts/run-bios.sh
@@ -228,15 +95,74 @@ make CROSS=x86_64-linux-gnu- uefi
 make CROSS=x86_64-linux-gnu- run-uefi OVMF=/usr/share/OVMF/OVMF_CODE.fd
 ```
 
+## Core features
+
+### Interrupts and reliability
+
+- ACPI RSDP + MADT/HPET discovery (LAPIC/IOAPIC/HPET addresses)
+- APIC timer with PIT fallback, HPET+IOAPIC path when available
+- PS/2 keyboard IRQ handling
+- unified panic path for exceptions with register/frame dump + backtrace
+- page fault diagnostics with decoded error bits
+
+### Scheduler and processes
+
+- context switch primitive in ASM (`switch_context`)
+- round-robin scheduler in C with timer preemption
+- simplified process model: `fork`, `exec`, `wait`
+- ring3 transition demos and preemptive ring3 task switching
+
+### Memory
+
+- kernel heap on mapped 4K pages
+- `kmalloc` / `kfree` (first-fit, split, coalesce)
+- shell diagnostics: `memstat`, `memtest`
+
+### Syscalls
+
+- ABI: `syscall/sysret` with `int 0x80` fallback
+- implemented: `write`, `exit`, `getpid`, `sleep`, `yield`, `fork`, `exec`, `wait`
+
+### Filesystem and loading
+
+- FAT12/16 path-based read via ATA PIO
+- ELF loader in kernel:
+  - `runelf <path>` (kernel-space entry jump)
+  - `runuser <path>` (validated user-range ELF -> ring3)
+
+### Drivers and tooling
+
+- PCI enumeration (`pciscan`)
+- serial + VGA text mode + framebuffer fallback
+- gdb helper commands and CI smoke/runtime checks
+
+## Shell commands
+
+- `help`
+- `ls`, `cat <file>`, `echo <text>`, `clear`
+- `pid`, `sleep <ms>`, `wait [pid]`
+- `memstat`, `memtest`
+- `lsdisk`, `lsdisk <path>`, `catdisk <path>`
+- `runelf <path>`, `runuser <path>`
+- `pciscan`
+- `fork`, `exec <a|b|shell>`
+- `userdemo`, `userpreempt`
+
 ## Debugging with gdb + QEMU
 
-Start QEMU stopped with gdb-server on `:1234`:
+Start QEMU paused with gdbstub:
 
 ```bash
 make CROSS=x86_64-linux-gnu- run-gdb
 ```
 
-In another terminal:
+Attach with prepared script:
+
+```bash
+make CROSS=x86_64-linux-gnu- gdb-attach
+```
+
+Manual attach:
 
 ```bash
 gdb build/kernel.elf
@@ -245,47 +171,70 @@ gdb build/kernel.elf
 (gdb) c
 ```
 
-Or with prepared script:
+## CI checks
 
-```bash
-make CROSS=x86_64-linux-gnu- gdb-attach
-```
-
-Alternative launcher:
-
-```bash
-scripts/run-bios-gdb.sh
-```
-
-## CI and Automated Output Checks
-
-`ci-smoke` verifies deterministic boot breadcrumbs through `kmain` entry:
-- expected marker stream contains `SLPGJKXYM`
+Smoke boot marker check:
 
 ```bash
 make CROSS=x86_64-linux-gnu- ci-smoke
 ```
 
-`ci-runtime` validates runtime banner lines:
+Runtime banner checks:
 
 ```bash
 make CROSS=x86_64-linux-gnu- ci-runtime
 ```
 
-## Release Tooling
+## Deep technical details
 
-- Current release version:
-  - `cat VERSION`
-- Run release gates:
-  - `make CROSS=x86_64-linux-gnu- release-check`
-- Build release artifacts + checksums:
-  - `make CROSS=x86_64-linux-gnu- dist`
-- Changelog:
-  - `CHANGELOG.md`
+### GDT/IDT layout
+
+GDT:
+- stage2: minimal 32/64-bit segments for mode transition
+- kernel: kernel code/data, user code/data, TSS descriptor
+
+IDT vectors (configured in `kernel/kernel.c`):
+- `0`: divide-by-zero (`#DE`)
+- `14`: page fault (`#PF`)
+- `32`: timer IRQ0
+- `33`: PS/2 keyboard IRQ1
+- `0x80`: syscall trap
+
+### Memory map (BIOS path)
+
+- `0x00007C00`: stage1 boot sector
+- `0x00008000`: stage2 loader
+- `0x00090000`: PML4
+- `0x00091000`: PDPT
+- `0x00092000`: PD (identity map)
+- `0x00093000`: PD for LAPIC/HPET mapping
+- `0xFED00000`: HPET MMIO (mapped)
+- `0xFEE00000`: LAPIC MMIO (mapped)
+- `0x00100000`: kernel image load address
+- `0x00200000`: bootstrap stack top
+- `0x000B8000`: VGA text buffer fallback
+
+Kernel loader constraint:
+- `KERNEL_SECTORS=128` in both:
+  - `boot/stage2.asm`
+  - `Makefile`
+
+### Syscall ABI (current)
+
+- `rax`: syscall number
+- `rdi`, `rsi`: args 0..1
+- return value in `rax`
+
+## Release tooling
+
+- current version: `cat VERSION`
+- release gates: `make CROSS=x86_64-linux-gnu- release-check`
+- build release artifacts + checksums: `make CROSS=x86_64-linux-gnu- dist`
+- release notes: `CHANGELOG.md`
 
 ## Roadmap
 
-- HPET timer backend
-- ring3 user scheduler (multi-user tasks)
+- per-process address-space isolation
+- richer ring3 userspace model
 - on-disk ext2 reader
-- richer framebuffer text/graphics renderer
+- improved framebuffer text/graphics renderer
