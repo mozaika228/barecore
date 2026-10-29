@@ -111,6 +111,7 @@ ci-smoke: $(BUILD_DIR)/os.img
 	cat $(BUILD_DIR)/qemu.log; \
 	if [ $$status -ne 0 ] && [ $$status -ne 124 ]; then exit $$status; fi
 	grep -q "SLPGJKXYM" $(BUILD_DIR)/qemu.log
+	grep -q "memory: BIOS E820 allocator online; heap pages=0x0000000000000040" $(BUILD_DIR)/qemu.log
 	grep -q "memory: heap placement + user/kernel page boundaries OK" $(BUILD_DIR)/qemu.log
 	grep -q "scheduler: round-robin" $(BUILD_DIR)/qemu.log
 	grep -Eq "drivers: (HPET\+IOAPIC|APIC|PIT)" $(BUILD_DIR)/qemu.log
@@ -127,6 +128,7 @@ ci-runtime: $(BUILD_DIR)/os.img
 	cat $(BUILD_DIR)/qemu-runtime.log; \
 	if [ $$status -ne 0 ] && [ $$status -ne 124 ]; then exit $$status; fi
 	grep -q "barecore kernel (production path)" $(BUILD_DIR)/qemu-runtime.log
+	grep -q "memory: BIOS E820 allocator online; heap pages=0x0000000000000040" $(BUILD_DIR)/qemu-runtime.log
 	grep -q "scheduler: round-robin" $(BUILD_DIR)/qemu-runtime.log
 	grep -Eq "drivers: (HPET\+IOAPIC|APIC|PIT).*PS/2 keyboard" $(BUILD_DIR)/qemu-runtime.log
 	grep -q "memory: heap placement + user/kernel page boundaries OK" $(BUILD_DIR)/qemu-runtime.log

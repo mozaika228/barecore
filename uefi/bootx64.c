@@ -85,6 +85,8 @@ static void fill_boot_info(EFI_SYSTEM_TABLE *st, barecore_boot_info_t *bi) {
     bi->framebuffer_bpp = 0;
     bi->framebuffer_format = 0;
     bi->reserved = 0;
+    bi->memory_map_count = 0;
+    bi->memory_map_source = BARECORE_MEMORY_SOURCE_UEFI;
 
     status = uefi_call_wrapper(st->BootServices->LocateProtocol, 3,
                                &GraphicsOutputProtocol, NULL, (void **)&gop);
@@ -98,6 +100,36 @@ static void fill_boot_info(EFI_SYSTEM_TABLE *st, barecore_boot_info_t *bi) {
     bi->framebuffer_pitch_pixels = gop->Mode->Info->PixelsPerScanLine;
     bi->framebuffer_bpp = 32;
     bi->framebuffer_format = gop->Mode->Info->PixelFormat;
+}
+
+static EFI_STATUS copy_memory_map(barecore_boot_info_t *bi,
+                                  EFI_MEMORY_DESCRIPTOR *map,
+                                  UINTN map_size,
+                                  UINTN descriptor_size) {
+    UINTN count;
+    if (descriptor_size < sizeof(EFI_MEMORY_DESCRIPTOR) || descriptor_size == 0) {
+        return EFI_LOAD_ERROR;
+    }
+    count = map_size / descriptor_size;
+    if (count == 0 || count > BARECORE_MEMORY_MAP_MAX) {
+        return EFI_BUFFER_TOO_SMALL;
+    }
+
+    for (UINTN i = 0; i < count; ++i) {
+        EFI_MEMORY_DESCRIPTOR *desc =
+            (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)map + i * descriptor_size);
+        bi->memory_map[i].base = desc->PhysicalStart;
+        if (desc->NumberOfPages > (~(UINT64)0 / 0x1000ULL)) {
+            return EFI_LOAD_ERROR;
+        }
+        bi->memory_map[i].length = desc->NumberOfPages * 0x1000ULL;
+        bi->memory_map[i].type = (desc->Type == EfiConventionalMemory)
+                                     ? BARECORE_MEMORY_USABLE
+                                     : BARECORE_MEMORY_RESERVED;
+        bi->memory_map[i].attributes = (UINT32)desc->Attribute;
+    }
+    bi->memory_map_count = (UINT32)count;
+    return EFI_SUCCESS;
 }
 
 EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
@@ -141,6 +173,12 @@ EFI_STATUS efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
                                &mmap_size, mmap, &map_key, &desc_size, &desc_version);
     if (EFI_ERROR(status)) {
         Print(L"GetMemoryMap failed: %r\r\n", status);
+        return status;
+    }
+
+    status = copy_memory_map(&boot_info, mmap, mmap_size, desc_size);
+    if (EFI_ERROR(status)) {
+        Print(L"Memory map too large or malformed: %r\r\n", status);
         return status;
     }
 

@@ -6,6 +6,10 @@ KERNEL_SECTORS  equ 128
 KERNEL_SEGMENT  equ 0x1000
 KERNEL_OFFSET   equ 0x0000
 KERNEL_DEST     equ 0x00100000
+BOOT_INFO_BASE  equ 0x00006000
+BOOT_INFO_SEG   equ 0x0600
+BOOT_MAP_OFFSET equ 48
+MEMORY_MAP_MAX  equ 128
 
 CODE32_SEL      equ 0x08
 DATA32_SEL      equ 0x10
@@ -27,6 +31,7 @@ stage2_start:
     call serial_putc
 
     call enable_a20
+    call collect_e820
     call load_kernel
     mov al, 'L'
     call serial_putc
@@ -42,6 +47,53 @@ enable_a20:
     in al, 0x92
     or al, 0x02
     out 0x92, al
+    ret
+
+collect_e820:
+    push es
+    mov ax, BOOT_INFO_SEG
+    mov es, ax
+    xor di, di
+    xor eax, eax
+    mov cx, 24
+    rep stosw
+
+    mov dword [es:0], 0x434F5245
+    mov dword [es:4], 0x42415245
+    mov dword [es:44], 1
+
+    mov di, BOOT_MAP_OFFSET
+    xor ebx, ebx
+    xor bp, bp
+.next:
+    mov eax, 0xE820
+    mov edx, 0x534D4150
+    mov ecx, 24
+    push es
+    push di
+    push bp
+    int 0x15
+    pop bp
+    pop di
+    pop es
+    jc .done
+    cmp eax, 0x534D4150
+    jne .done
+    cmp ecx, 20
+    jb .done
+    cmp ecx, 24
+    jae .attributes_ready
+    mov dword [es:di + 20], 1
+.attributes_ready:
+    inc bp
+    add di, 24
+    cmp bp, MEMORY_MAP_MAX
+    jae .done
+    test ebx, ebx
+    jnz .next
+.done:
+    mov [es:40], bp
+    pop es
     ret
 
 load_kernel:
@@ -135,7 +187,13 @@ protected_mode:
     mov ecx, (KERNEL_SECTORS * 512) / 4
     rep movsd
 
-    ; Build minimal 4-level page tables for identity map of first 2 MiB.
+    ; Do not depend on firmware leaving scratch RAM zeroed.
+    mov edi, PML4_BASE
+    xor eax, eax
+    mov ecx, (7 * 4096) / 4
+    rep stosd
+
+    ; Build 4-level tables for the low 1 GiB identity map.
     ; Upper-level U/S bits must allow access, while leaf permissions below
     ; keep kernel and firmware pages supervisor-only.
     mov dword [PML4_BASE + 0], PDPT_BASE | 0x007
@@ -167,9 +225,19 @@ protected_mode:
     mov dword [PD_BASE + 0], LOW_PT_BASE | 0x007
     mov dword [PD_BASE + 4], 0x00000000
 
-    ; Identity map 2..4 MiB as supervisor-only large pages.
-    mov dword [PD_BASE + 8], 0x00200083
-    mov dword [PD_BASE + 12], 0
+    ; Map the remaining low 1 GiB with supervisor-only 2 MiB pages.
+    mov edi, PD_BASE + 8
+    mov ecx, 1
+.map_large:
+    mov eax, ecx
+    shl eax, 21
+    or eax, 0x083
+    mov [edi], eax
+    mov dword [edi + 4], 0
+    add edi, 8
+    inc ecx
+    cmp ecx, 512
+    jb .map_large
 
     ; Map LAPIC/HPET MMIO (0xFEE00000/0xFED00000) via PDPT[3] -> PD_APIC.
     mov dword [PDPT_BASE + (3 * 8) + 0], PD_APIC_BASE | 0x003
@@ -229,7 +297,7 @@ long_mode:
     mov gs, ax
 
     mov rsp, 0x0009E000
-    xor rdi, rdi
+    mov edi, BOOT_INFO_BASE
     mov rax, KERNEL_DEST
     jmp rax
 

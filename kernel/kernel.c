@@ -64,13 +64,25 @@
 #define PD_APIC_BASE_ADDR 0x00093000u
 #define HEAP_PT_ADDR 0x00094000u
 #define LOW_PT_ADDR 0x00095000u
+#define HEAP_PD_ADDR 0x00096000u
 #define PD_BASE_ADDR 0x00092000u
 #define PAGE_SIZE 4096u
-#define HEAP_BASE 0x0001000000u
+#define HEAP_BASE 0x40000000u
 #define HEAP_PAGES 64u
-#define IDENTITY_MAP_LIMIT 0x00200000u
+#define IDENTITY_MAP_LIMIT 0x40000000ULL
 #define USER_PAGE_START USER_IMAGE_BASE
 #define USER_PAGE_END USER_STACK_TOP
+#define PHYS_MIN_ALLOC 0x00100000ULL
+
+_Static_assert(sizeof(barecore_memory_region_t) == 24, "boot memory-map entry ABI changed");
+_Static_assert(offsetof(barecore_boot_info_t, memory_map_count) == 40, "boot-info header ABI changed");
+_Static_assert(offsetof(barecore_boot_info_t, memory_map) == 48, "BIOS E820 buffer offset changed");
+
+typedef struct {
+    uint64_t start;
+    uint64_t next;
+    uint64_t end;
+} phys_range_t;
 
 typedef struct {
     uint64_t rax;
@@ -377,6 +389,11 @@ typedef struct heap_block {
     struct heap_block *next;
 } heap_block_t;
 static heap_block_t *heap_head = 0;
+static phys_range_t phys_ranges[BARECORE_MEMORY_MAP_MAX];
+static uint64_t heap_phys_pages[HEAP_PAGES];
+static uint32_t phys_range_count = 0;
+static uint64_t phys_pages_allocated = 0;
+static uint32_t phys_memory_map_source = 0;
 static uint8_t sched_preempt = 0;
 static uint64_t sched_quantum = 5;
 static uint8_t syscall_enabled = 0;
@@ -913,33 +930,94 @@ static void map_mmio_2m(uint64_t phys) {
     invlpg((void *)(uintptr_t)base);
 }
 
+static int init_phys_allocator(const barecore_boot_info_t *bi) {
+    uint64_t kernel_floor = ((uint64_t)(uintptr_t)__kernel_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    if (!bi || bi->magic != BARECORE_BOOTINFO_MAGIC ||
+        bi->memory_map_count == 0 || bi->memory_map_count > BARECORE_MEMORY_MAP_MAX) {
+        return 0;
+    }
+
+    phys_range_count = 0;
+    phys_memory_map_source = bi->memory_map_source;
+    for (uint32_t i = 0; i < bi->memory_map_count; ++i) {
+        const barecore_memory_region_t *region = &bi->memory_map[i];
+        uint64_t limit;
+        uint64_t start;
+        if (region->type != BARECORE_MEMORY_USABLE || region->length == 0 ||
+            (bi->memory_map_source == BARECORE_MEMORY_SOURCE_BIOS &&
+             (region->attributes & 1u) == 0) ||
+            region->base > UINT64_MAX - region->length) {
+            continue;
+        }
+        limit = (region->base + region->length) & ~(uint64_t)(PAGE_SIZE - 1);
+        if (region->base > UINT64_MAX - (PAGE_SIZE - 1)) {
+            continue;
+        }
+        start = (region->base + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+        if (start < PHYS_MIN_ALLOC) {
+            start = PHYS_MIN_ALLOC;
+        }
+        if (start < kernel_floor) {
+            start = kernel_floor;
+        }
+        if (limit > IDENTITY_MAP_LIMIT) {
+            limit = IDENTITY_MAP_LIMIT;
+        }
+        if (start >= limit || phys_range_count >= BARECORE_MEMORY_MAP_MAX) {
+            continue;
+        }
+        phys_ranges[phys_range_count].start = start;
+        phys_ranges[phys_range_count].next = start;
+        phys_ranges[phys_range_count].end = limit;
+        phys_range_count++;
+    }
+    return phys_range_count != 0;
+}
+
+static uint64_t phys_alloc_page(void) {
+    for (uint32_t i = 0; i < phys_range_count; ++i) {
+        if (phys_ranges[i].next <= phys_ranges[i].end - PAGE_SIZE) {
+            uint64_t page = phys_ranges[i].next;
+            phys_ranges[i].next += PAGE_SIZE;
+            phys_pages_allocated++;
+            return page;
+        }
+    }
+    return 0;
+}
+
+static int phys_page_is_managed(uint64_t page) {
+    for (uint32_t i = 0; i < phys_range_count; ++i) {
+        if (page >= phys_ranges[i].start && page < phys_ranges[i].end) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void init_kernel_heap(void) {
-    uint64_t pdpt = PDPT_BASE_ADDR;
-    uint64_t pdpt_entry = read_pte((void *)pdpt, 0);
-    if ((pdpt_entry & 1) == 0) {
+    if ((read_pte((void *)PML4_BASE_ADDR, 0) & 1) == 0) {
         return;
     }
-    uint64_t pd = pdpt_entry & ~0xFFFULL;
-    uint64_t pd_idx = (HEAP_BASE >> 21) & 0x1FF;
-    if (read_pte((void *)pd, (uint16_t)pd_idx) & (1u << 7)) {
-        return;
+    uint64_t *heap_pd = (uint64_t *)(uintptr_t)HEAP_PD_ADDR;
+    for (uint32_t i = 0; i < 512; ++i) {
+        heap_pd[i] = 0;
     }
     uint64_t pt = HEAP_PT_ADDR;
     for (uint32_t i = 0; i < 512; ++i) {
         write_pte((void *)pt, (uint16_t)i, 0);
     }
-    write_pte((void *)pd, (uint16_t)pd_idx, (pt & ~0xFFFULL) | 0x003);
+    heap_pd[0] = (pt & ~0xFFFULL) | 0x003;
+    write_pte((void *)PDPT_BASE_ADDR, 1, ((uint64_t)HEAP_PD_ADDR) | 0x003);
 
-    uint64_t heap_phys = ((uint64_t)(uintptr_t)__kernel_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
-    uint64_t heap_bytes = (uint64_t)HEAP_PAGES * PAGE_SIZE;
-    if (heap_phys < 0x00100000ULL || heap_phys + heap_bytes > IDENTITY_MAP_LIMIT) {
-        write_cstr("memory: kernel leaves no safe low heap region\n");
-        return;
-    }
     for (uint32_t i = 0; i < HEAP_PAGES; ++i) {
         uint64_t vaddr = HEAP_BASE + (uint64_t)i * PAGE_SIZE;
-        uint64_t paddr = heap_phys + (uint64_t)i * PAGE_SIZE;
-        map_page_4k(vaddr, paddr, 0x003);
+        uint64_t paddr = phys_alloc_page();
+        if (!paddr || !map_page_4k(vaddr, paddr, 0x003)) {
+            write_cstr("memory: physical page allocation failed\n");
+            return;
+        }
+        heap_phys_pages[i] = paddr;
     }
     heap_head = (heap_block_t *)(uintptr_t)HEAP_BASE;
     heap_head->size = (uint64_t)HEAP_PAGES * PAGE_SIZE - sizeof(heap_block_t);
@@ -951,6 +1029,7 @@ static void init_kernel_heap(void) {
 static int memory_boundary_selftest(void) {
     uint64_t *low_pt = (uint64_t *)(uintptr_t)LOW_PT_ADDR;
     uint64_t kernel_page = ((uint64_t)(uintptr_t)__kernel_end - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t kernel_mapping;
     uint64_t heap_page = HEAP_BASE;
     uint64_t heap_entry;
     uint64_t heap_last_entry;
@@ -960,8 +1039,15 @@ static int memory_boundary_selftest(void) {
     heap_entry = heap_pt[heap_index];
     heap_last_entry = heap_pt[heap_last_index];
 
-    if (!heap_enabled || kernel_page >= IDENTITY_MAP_LIMIT) {
+    if (!heap_enabled || phys_range_count == 0 || phys_pages_allocated != HEAP_PAGES ||
+        phys_memory_map_source != BARECORE_MEMORY_SOURCE_BIOS ||
+        kernel_page >= IDENTITY_MAP_LIMIT) {
         return 0;
+    }
+    if (kernel_page < 0x00200000ULL) {
+        kernel_mapping = low_pt[kernel_page >> 12];
+    } else {
+        kernel_mapping = read_pte((void *)PD_BASE_ADDR, (uint16_t)((kernel_page >> 21) & 0x1FF));
     }
     if ((read_pte((void *)PML4_BASE_ADDR, 0) & 0x5) != 0x5 ||
         (read_pte((void *)PDPT_BASE_ADDR, 0) & 0x5) != 0x5 ||
@@ -970,20 +1056,37 @@ static int memory_boundary_selftest(void) {
         (low_pt[(USER_PAGE_END >> 12) - 1] & 0x5) != 0x5 ||
         (low_pt[(USER_PAGE_START >> 12) - 1] & 0x4) != 0 ||
         (low_pt[(USER_PAGE_END >> 12)] & 0x4) != 0 ||
-        (low_pt[(kernel_page >> 12)] & 0x4) != 0 ||
+        (kernel_mapping & 0x5) != 0x1 ||
         (heap_entry & 0x3) != 0x3 ||
         (heap_entry & 0x4) != 0 ||
         (heap_last_entry & 0x3) != 0x3 ||
         (heap_last_entry & 0x4) != 0 ||
-        (read_pte((void *)PD_BASE_ADDR, (uint16_t)((HEAP_BASE >> 21) & 0x1FF)) & 0x4) != 0 ||
-        (heap_entry & ~0xFFFULL) != (((uint64_t)(uintptr_t)__kernel_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1)) ||
-        (heap_last_entry & ~0xFFFULL) != (((uint64_t)(uintptr_t)__kernel_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1)) + ((uint64_t)HEAP_PAGES - 1) * PAGE_SIZE ||
+        (read_pte((void *)PDPT_BASE_ADDR, 1) & 0x4) != 0 ||
+        (read_pte((void *)HEAP_PD_ADDR, 0) & 0x4) != 0 ||
+        (heap_entry & ~0xFFFULL) != heap_phys_pages[0] ||
+        (heap_last_entry & ~0xFFFULL) != heap_phys_pages[HEAP_PAGES - 1] ||
+        !phys_page_is_managed(heap_phys_pages[0]) ||
+        !phys_page_is_managed(heap_phys_pages[HEAP_PAGES - 1]) ||
         !user_buffer_range_valid(USER_PAGE_START, 1) ||
         !user_buffer_range_valid(USER_PAGE_END - 1, 1) ||
         user_buffer_range_valid(USER_PAGE_START - 1, 1) ||
         user_buffer_range_valid(USER_PAGE_END, 1) ||
         user_buffer_range_valid(UINT64_MAX, 2)) {
         return 0;
+    }
+    for (uint32_t i = 0; i < HEAP_PAGES; ++i) {
+        uint16_t index = (uint16_t)(((HEAP_BASE >> 12) + i) & 0x1FF);
+        uint64_t entry = heap_pt[index];
+        if ((entry & 0x3) != 0x3 || (entry & 0x4) != 0 ||
+            (entry & ~0xFFFULL) != heap_phys_pages[i] ||
+            !phys_page_is_managed(heap_phys_pages[i])) {
+            return 0;
+        }
+        for (uint32_t j = 0; j < i; ++j) {
+            if (heap_phys_pages[i] == heap_phys_pages[j]) {
+                return 0;
+            }
+        }
     }
     return 1;
 }
@@ -2688,11 +2791,22 @@ void kmain(const barecore_boot_info_t *boot_info) {
     write_cstr("barecore kernel (production path)\n");
     write_cstr("long mode: OK\n");
 
+    if (!boot_info || boot_info->magic != BARECORE_BOOTINFO_MAGIC ||
+        boot_info->memory_map_source != BARECORE_MEMORY_SOURCE_BIOS) {
+        panic_halt("BOOT MEMORY MAP OR PAGING HANDOFF UNSUPPORTED", 0, 0);
+    }
+    if (!init_phys_allocator(boot_info)) {
+        panic_halt("NO USABLE PHYSICAL MEMORY IN BIOS E820 MAP", 0, 0);
+    }
+
     acpi_parse();
     init_kernel_heap();
     if (!memory_boundary_selftest()) {
         panic_halt("MEMORY BOUNDARY SELFTEST FAILED", 0, 0);
     }
+    write_cstr("memory: BIOS E820 allocator online; heap pages=");
+    write_u64_hex(phys_pages_allocated);
+    write_cstr("\n");
     write_cstr("memory: heap placement + user/kernel page boundaries OK\n");
     init_syscall_abi();
 

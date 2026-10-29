@@ -187,7 +187,8 @@ make CROSS=x86_64-linux-gnu- ci-runtime
 
 ### Current scope and known limitations
 
-- BIOS boot now checks heap placement and user/kernel page-table boundaries at runtime. The low-memory user window is shared; processes do not yet have independent address spaces.
+- BIOS boot consumes the E820 map and allocates heap backing pages only from usable regions. Runtime checks verify every heap mapping, heap/kernel separation, syscall buffer bounds, and user/kernel page-table boundaries. The low-memory user window is shared; processes do not yet have independent address spaces.
+- UEFI now exports its firmware memory map through the common boot-info ABI, but the kernel does not yet build its own UEFI page tables. UEFI runtime is therefore not supported by this allocator path yet.
 - `userdemo` and `userpreempt` are intentionally disabled because their code resides in the supervisor-only kernel image. `runuser` remains a single-process ELF experiment, not a complete process loader.
 - Ring-3 `fork`/`exec`/`exit`/`wait`, process isolation, and safe user-process reaping are not complete. Do not treat them as a stable userspace ABI.
 - CI checks BIOS smoke boot and a bounded runtime session; it does not yet create a FAT disk image or execute an ELF fixture, nor validate UEFI boot.
@@ -209,16 +210,21 @@ IDT vectors (configured in `kernel/kernel.c`):
 
 ### Memory map (BIOS path)
 
+- `0x00006000`: boot-info header followed by up to 128 BIOS E820 entries
 - `0x00007C00`: stage1 boot sector
 - `0x00008000`: stage2 loader
 - `0x00090000`: PML4
 - `0x00091000`: PDPT
-- `0x00092000`: PD (identity map)
+- `0x00092000`: PD (identity map of the first 1 GiB)
 - `0x00093000`: PD for LAPIC/HPET mapping
+- `0x00094000`: kernel heap page table
+- `0x00095000`: 4 KiB identity-map leaves for the first 2 MiB
+- `0x00096000`: page directory for the kernel heap virtual window
 - `0xFED00000`: HPET MMIO (mapped)
 - `0xFEE00000`: LAPIC MMIO (mapped)
 - `0x00100000`: kernel image load address
 - `0x00200000`: bootstrap stack top
+- `0x40000000`: kernel heap virtual base; physical frames come from usable E820 ranges
 - `0x000B8000`: VGA text buffer fallback
 
 Kernel loader constraint:
