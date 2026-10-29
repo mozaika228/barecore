@@ -16,6 +16,7 @@ PML4_BASE       equ 0x00090000
 PDPT_BASE       equ 0x00091000
 PD_BASE         equ 0x00092000
 PD_APIC_BASE    equ 0x00093000
+LOW_PT_BASE     equ 0x00095000
 
 stage2_start:
     cli
@@ -135,15 +136,40 @@ protected_mode:
     rep movsd
 
     ; Build minimal 4-level page tables for identity map of first 2 MiB.
-    mov dword [PML4_BASE + 0], PDPT_BASE | 0x003
+    ; Upper-level U/S bits must allow access, while leaf permissions below
+    ; keep kernel and firmware pages supervisor-only.
+    mov dword [PML4_BASE + 0], PDPT_BASE | 0x007
     mov dword [PML4_BASE + 4], 0x00000000
 
-    mov dword [PDPT_BASE + 0], PD_BASE | 0x003
+    mov dword [PDPT_BASE + 0], PD_BASE | 0x007
     mov dword [PDPT_BASE + 4], 0x00000000
 
-    ; Identity-map 0..2 MiB, user-accessible (for minimal ring3 demo).
-    mov dword [PD_BASE + 0], 0x00000087
+    ; Split the low 2 MiB into 4 KiB leaves. Only the ELF/stack window
+    ; 0x20000..0x7ffff is user-accessible; kernel and boot memory stay ring0.
+    mov edi, LOW_PT_BASE
+    xor ecx, ecx
+.map_low:
+    mov eax, ecx
+    shl eax, 12
+    or eax, 0x003
+    cmp ecx, 0x20
+    jb .store_low
+    cmp ecx, 0x80
+    jae .store_low
+    or eax, 0x004
+.store_low:
+    mov [edi], eax
+    mov dword [edi + 4], 0
+    add edi, 8
+    inc ecx
+    cmp ecx, 512
+    jb .map_low
+    mov dword [PD_BASE + 0], LOW_PT_BASE | 0x007
     mov dword [PD_BASE + 4], 0x00000000
+
+    ; Identity map 2..4 MiB as supervisor-only large pages.
+    mov dword [PD_BASE + 8], 0x00200083
+    mov dword [PD_BASE + 12], 0
 
     ; Map LAPIC/HPET MMIO (0xFEE00000/0xFED00000) via PDPT[3] -> PD_APIC.
     mov dword [PDPT_BASE + (3 * 8) + 0], PD_APIC_BASE | 0x003

@@ -62,11 +62,15 @@
 #define PML4_BASE_ADDR 0x00090000u
 #define PDPT_BASE_ADDR 0x00091000u
 #define PD_APIC_BASE_ADDR 0x00093000u
+#define HEAP_PT_ADDR 0x00094000u
+#define LOW_PT_ADDR 0x00095000u
 #define PD_BASE_ADDR 0x00092000u
 #define PAGE_SIZE 4096u
 #define HEAP_BASE 0x0001000000u
 #define HEAP_PAGES 64u
 #define IDENTITY_MAP_LIMIT 0x00200000u
+#define USER_PAGE_START USER_IMAGE_BASE
+#define USER_PAGE_END USER_STACK_TOP
 
 typedef struct {
     uint64_t rax;
@@ -314,6 +318,7 @@ extern void gdt_load(void *gdtr);
 extern void tss_load(uint16_t selector);
 extern void switch_context(uint64_t *old_rsp_slot, uint64_t *new_rsp_slot);
 extern void enter_user_mode(void (*entry)(void), uint64_t user_stack);
+extern char __kernel_end[];
 extern void isr_timer_stub(void);
 extern void isr_keyboard_stub(void);
 extern void isr_syscall_stub(void);
@@ -377,6 +382,7 @@ static uint64_t sched_quantum = 5;
 static uint8_t syscall_enabled = 0;
 static uint8_t syscall_stack[STACK_SIZE];
 static volatile uint8_t panic_active = 0;
+static int user_buffer_range_valid(uint64_t start, size_t len);
 
 static fat_fs_t fat_fs;
 static uint8_t fat_sector[512];
@@ -918,10 +924,18 @@ static void init_kernel_heap(void) {
     if (read_pte((void *)pd, (uint16_t)pd_idx) & (1u << 7)) {
         return;
     }
-    uint64_t pt = PD_BASE_ADDR + 0x1000;
+    uint64_t pt = HEAP_PT_ADDR;
+    for (uint32_t i = 0; i < 512; ++i) {
+        write_pte((void *)pt, (uint16_t)i, 0);
+    }
     write_pte((void *)pd, (uint16_t)pd_idx, (pt & ~0xFFFULL) | 0x003);
 
-    uint64_t heap_phys = 0x00100000ULL;
+    uint64_t heap_phys = ((uint64_t)(uintptr_t)__kernel_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t heap_bytes = (uint64_t)HEAP_PAGES * PAGE_SIZE;
+    if (heap_phys < 0x00100000ULL || heap_phys + heap_bytes > IDENTITY_MAP_LIMIT) {
+        write_cstr("memory: kernel leaves no safe low heap region\n");
+        return;
+    }
     for (uint32_t i = 0; i < HEAP_PAGES; ++i) {
         uint64_t vaddr = HEAP_BASE + (uint64_t)i * PAGE_SIZE;
         uint64_t paddr = heap_phys + (uint64_t)i * PAGE_SIZE;
@@ -932,6 +946,46 @@ static void init_kernel_heap(void) {
     heap_head->free = 1;
     heap_head->next = 0;
     heap_enabled = 1;
+}
+
+static int memory_boundary_selftest(void) {
+    uint64_t *low_pt = (uint64_t *)(uintptr_t)LOW_PT_ADDR;
+    uint64_t kernel_page = ((uint64_t)(uintptr_t)__kernel_end - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t heap_page = HEAP_BASE;
+    uint64_t heap_entry;
+    uint64_t heap_last_entry;
+    uint16_t heap_index = (uint16_t)((heap_page >> 12) & 0x1FF);
+    uint16_t heap_last_index = (uint16_t)(((heap_page + ((uint64_t)HEAP_PAGES - 1) * PAGE_SIZE) >> 12) & 0x1FF);
+    uint64_t *heap_pt = (uint64_t *)(uintptr_t)HEAP_PT_ADDR;
+    heap_entry = heap_pt[heap_index];
+    heap_last_entry = heap_pt[heap_last_index];
+
+    if (!heap_enabled || kernel_page >= IDENTITY_MAP_LIMIT) {
+        return 0;
+    }
+    if ((read_pte((void *)PML4_BASE_ADDR, 0) & 0x5) != 0x5 ||
+        (read_pte((void *)PDPT_BASE_ADDR, 0) & 0x5) != 0x5 ||
+        (read_pte((void *)PD_BASE_ADDR, 0) & 0x5) != 0x5 ||
+        (low_pt[(USER_PAGE_START >> 12)] & 0x5) != 0x5 ||
+        (low_pt[(USER_PAGE_END >> 12) - 1] & 0x5) != 0x5 ||
+        (low_pt[(USER_PAGE_START >> 12) - 1] & 0x4) != 0 ||
+        (low_pt[(USER_PAGE_END >> 12)] & 0x4) != 0 ||
+        (low_pt[(kernel_page >> 12)] & 0x4) != 0 ||
+        (heap_entry & 0x3) != 0x3 ||
+        (heap_entry & 0x4) != 0 ||
+        (heap_last_entry & 0x3) != 0x3 ||
+        (heap_last_entry & 0x4) != 0 ||
+        (read_pte((void *)PD_BASE_ADDR, (uint16_t)((HEAP_BASE >> 21) & 0x1FF)) & 0x4) != 0 ||
+        (heap_entry & ~0xFFFULL) != (((uint64_t)(uintptr_t)__kernel_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1)) ||
+        (heap_last_entry & ~0xFFFULL) != (((uint64_t)(uintptr_t)__kernel_end + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1)) + ((uint64_t)HEAP_PAGES - 1) * PAGE_SIZE ||
+        !user_buffer_range_valid(USER_PAGE_START, 1) ||
+        !user_buffer_range_valid(USER_PAGE_END - 1, 1) ||
+        user_buffer_range_valid(USER_PAGE_START - 1, 1) ||
+        user_buffer_range_valid(USER_PAGE_END, 1) ||
+        user_buffer_range_valid(UINT64_MAX, 2)) {
+        return 0;
+    }
+    return 1;
 }
 
 static void init_syscall_abi(void) {
@@ -1488,6 +1542,15 @@ static void task_sleep_ticks(uint64_t sleep_ticks) {
     schedule();
 }
 
+static int user_buffer_range_valid(uint64_t start, size_t len) {
+    uint64_t end;
+    if (len == 0) {
+        return 1;
+    }
+    end = start + (uint64_t)len - 1;
+    return end >= start && start >= USER_PAGE_START && end < USER_PAGE_END;
+}
+
 static long ksys_write(const char *buf, size_t len) {
     if (!buf) {
         return -1;
@@ -1497,8 +1560,7 @@ static long ksys_write(const char *buf, size_t len) {
     }
     if (len > 0) {
         uint64_t start = (uint64_t)(uintptr_t)buf;
-        uint64_t end = start + (uint64_t)len - 1;
-        if (end < start || start >= IDENTITY_MAP_LIMIT || end >= IDENTITY_MAP_LIMIT) {
+        if (!user_buffer_range_valid(start, len)) {
             return -1;
         }
     }
@@ -1529,7 +1591,8 @@ static long userspace_write(const char *s) {
     while (s[len]) {
         len++;
     }
-    return ksys_write(s, len);
+    write_text(s, len);
+    return (long)len;
 }
 
 static long userspace_getpid(void) {
@@ -2211,7 +2274,8 @@ static int elf_load_image(const uint8_t *buf, uint32_t len, uint64_t *entry_out)
     if (eh->type != 2 || eh->machine != 0x3E || eh->phentsize != sizeof(elf64_phdr_t)) {
         return 0;
     }
-    if ((uint64_t)eh->phoff + (uint64_t)eh->phnum * sizeof(elf64_phdr_t) > len) {
+    if (eh->phoff > len ||
+        (uint64_t)eh->phnum > ((uint64_t)len - eh->phoff) / sizeof(elf64_phdr_t)) {
         return 0;
     }
     for (uint16_t i = 0; i < eh->phnum; ++i) {
@@ -2222,7 +2286,7 @@ static int elf_load_image(const uint8_t *buf, uint32_t len, uint64_t *entry_out)
         if (ph->filesz > ph->memsz) {
             return 0;
         }
-        if ((uint64_t)ph->offset + ph->filesz > len) {
+        if (ph->offset > len || ph->filesz > (uint64_t)len - ph->offset) {
             return 0;
         }
         uint8_t *dst = (uint8_t *)(uintptr_t)ph->vaddr;
@@ -2252,7 +2316,8 @@ static int elf_load_user_image(const uint8_t *buf, uint32_t len, uint64_t *entry
     if (eh->type != 2 || eh->machine != 0x3E || eh->phentsize != sizeof(elf64_phdr_t)) {
         return 0;
     }
-    if ((uint64_t)eh->phoff + (uint64_t)eh->phnum * sizeof(elf64_phdr_t) > len) {
+    if (eh->phoff > len ||
+        (uint64_t)eh->phnum > ((uint64_t)len - eh->phoff) / sizeof(elf64_phdr_t)) {
         return 0;
     }
     if (eh->entry < USER_IMAGE_BASE || eh->entry >= USER_IMAGE_END) {
@@ -2267,10 +2332,11 @@ static int elf_load_user_image(const uint8_t *buf, uint32_t len, uint64_t *entry
         if (ph->filesz > ph->memsz) {
             return 0;
         }
-        if ((uint64_t)ph->offset + ph->filesz > len) {
+        if (ph->offset > len || ph->filesz > (uint64_t)len - ph->offset) {
             return 0;
         }
-        if (ph->vaddr < USER_IMAGE_BASE || (ph->vaddr + ph->memsz) > USER_IMAGE_END) {
+        if (ph->vaddr < USER_IMAGE_BASE || ph->vaddr >= USER_IMAGE_END ||
+            ph->memsz > USER_IMAGE_END - ph->vaddr) {
             return 0;
         }
     }
@@ -2525,23 +2591,11 @@ static void shell_exec(char *line) {
         return;
     }
     if (str_equal(line, "userdemo")) {
-        userspace_write("entering ring3 demo...\n");
-        enter_user_mode(user_demo, USER_STACK_TOP);
+        userspace_write("userdemo: built-in kernel code is supervisor-only; load a user ELF with runuser\n");
         return;
     }
     if (str_equal(line, "userpreempt")) {
-        userspace_write("starting ring3 preemptive demo...\n");
-        for (int i = 0; i < MAX_USER_TASKS; ++i) {
-            user_tasks[i].active = 0;
-        }
-        create_user_task(0, user_task_a);
-        create_user_task(1, user_task_b);
-        create_user_task(2, user_task_c);
-        create_user_task(3, user_task_d);
-        current_user = 0;
-        ring3_enabled = 1;
-        user_need_resched = 0;
-        enter_user_mode(user_task_a, user_tasks[0].rsp);
+        userspace_write("userpreempt: separate user address spaces are not implemented\n");
         return;
     }
     userspace_write("unknown command\n");
@@ -2636,6 +2690,10 @@ void kmain(const barecore_boot_info_t *boot_info) {
 
     acpi_parse();
     init_kernel_heap();
+    if (!memory_boundary_selftest()) {
+        panic_halt("MEMORY BOUNDARY SELFTEST FAILED", 0, 0);
+    }
+    write_cstr("memory: heap placement + user/kernel page boundaries OK\n");
     init_syscall_abi();
 
     init_idt();

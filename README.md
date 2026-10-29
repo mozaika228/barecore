@@ -55,7 +55,7 @@ flowchart LR
 Mode transitions:
 
 ```text
-real mode -> protected mode -> long mode -> kernel runtime -> ring3 demos/userspace
+real mode -> protected mode -> long mode -> kernel runtime -> experimental ring3 ELF
 ```
 
 ## Quick start
@@ -110,7 +110,7 @@ make CROSS=x86_64-linux-gnu- run-uefi OVMF=/usr/share/OVMF/OVMF_CODE.fd
 - context switch primitive in ASM (`switch_context`)
 - round-robin scheduler in C with timer preemption
 - simplified process model: `fork`, `exec`, `wait`
-- ring3 transition demos and preemptive ring3 task switching
+- experimental single ring3 ELF transition; see current scope limitations below
 
 ### Memory
 
@@ -184,6 +184,13 @@ Runtime banner checks:
 ```bash
 make CROSS=x86_64-linux-gnu- ci-runtime
 ```
+
+### Current scope and known limitations
+
+- BIOS boot now checks heap placement and user/kernel page-table boundaries at runtime. The low-memory user window is shared; processes do not yet have independent address spaces.
+- `userdemo` and `userpreempt` are intentionally disabled because their code resides in the supervisor-only kernel image. `runuser` remains a single-process ELF experiment, not a complete process loader.
+- Ring-3 `fork`/`exec`/`exit`/`wait`, process isolation, and safe user-process reaping are not complete. Do not treat them as a stable userspace ABI.
+- CI checks BIOS smoke boot and a bounded runtime session; it does not yet create a FAT disk image or execute an ELF fixture, nor validate UEFI boot.
 
 ## Deep technical details
 

@@ -16,8 +16,12 @@ SECTIONS
         *(.data*)
     }
 
+    __bss_start = .;
     .bss : ALIGN(4K) {
         *(COMMON)
         *(.bss*)
     }
+    __bss_end = .;
+
+    __kernel_end = .;
 }

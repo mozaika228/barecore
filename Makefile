@@ -9,6 +9,7 @@ EFI_OBJCOPY ?= objcopy
 BUILD_DIR := build
 STAGE2_SECTORS := 8
 KERNEL_SECTORS := 128
+RUNTIME_SECONDS ?= 120
 
 CFLAGS := -ffreestanding -fno-pic -fno-stack-protector -m64 -mcmodel=kernel -mno-red-zone -O2 -Wall -Wextra
 EFI_CFLAGS ?= -fpic -fshort-wchar -mno-red-zone -Wall -Wextra -I/usr/include/efi -I/usr/include/efi/x86_64
@@ -101,28 +102,36 @@ run-uefi: uefi
 	qemu-system-x86_64 -bios $(OVMF) -drive format=raw,file=fat:rw:$(BUILD_DIR)/esp -serial stdio -device isa-debug-exit,iobase=0xf4,iosize=0x04
 
 ci-smoke: $(BUILD_DIR)/os.img
-	@set +e; \
-	timeout 30s qemu-system-x86_64 -nographic -monitor none -no-reboot -no-shutdown \
+	@set +e; timeout 30s qemu-system-x86_64 -nographic -monitor none -no-reboot -no-shutdown \
 		-drive format=raw,file=$(BUILD_DIR)/os.img \
 		-serial stdio \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-		2>&1 | tee $(BUILD_DIR)/qemu.log; \
+		> $(BUILD_DIR)/qemu.log 2>&1; \
 	status=$$?; \
+	cat $(BUILD_DIR)/qemu.log; \
 	if [ $$status -ne 0 ] && [ $$status -ne 124 ]; then exit $$status; fi
 	grep -q "SLPGJKXYM" $(BUILD_DIR)/qemu.log
+	grep -q "memory: heap placement + user/kernel page boundaries OK" $(BUILD_DIR)/qemu.log
+	grep -q "scheduler: round-robin" $(BUILD_DIR)/qemu.log
+	grep -Eq "drivers: (HPET\+IOAPIC|APIC|PIT)" $(BUILD_DIR)/qemu.log
+	grep -q "\[bcore shell\] type 'help'" $(BUILD_DIR)/qemu.log
+	! grep -q "=== PANIC ===" $(BUILD_DIR)/qemu.log
 
 ci-runtime: $(BUILD_DIR)/os.img
-	@set +e; \
-	timeout 30s qemu-system-x86_64 -nographic -monitor none -no-reboot -no-shutdown \
+	@set +e; timeout $(RUNTIME_SECONDS)s qemu-system-x86_64 -nographic -monitor none -no-reboot -no-shutdown \
 		-drive format=raw,file=$(BUILD_DIR)/os.img \
 		-serial stdio \
 		-device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-		2>&1 | tee $(BUILD_DIR)/qemu-runtime.log; \
+		> $(BUILD_DIR)/qemu-runtime.log 2>&1; \
 	status=$$?; \
+	cat $(BUILD_DIR)/qemu-runtime.log; \
 	if [ $$status -ne 0 ] && [ $$status -ne 124 ]; then exit $$status; fi
 	grep -q "barecore kernel (production path)" $(BUILD_DIR)/qemu-runtime.log
 	grep -q "scheduler: round-robin" $(BUILD_DIR)/qemu-runtime.log
-	grep -q "drivers: PIT + PS/2 keyboard" $(BUILD_DIR)/qemu-runtime.log
+	grep -Eq "drivers: (HPET\+IOAPIC|APIC|PIT).*PS/2 keyboard" $(BUILD_DIR)/qemu-runtime.log
+	grep -q "memory: heap placement + user/kernel page boundaries OK" $(BUILD_DIR)/qemu-runtime.log
+	grep -q "\[bcore shell\] type 'help'" $(BUILD_DIR)/qemu-runtime.log
+	! grep -q "=== PANIC ===" $(BUILD_DIR)/qemu-runtime.log
 
 print-version:
 	@echo $(VERSION)

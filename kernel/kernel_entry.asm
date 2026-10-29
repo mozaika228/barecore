@@ -14,6 +14,8 @@ global isr_page_fault_stub
 global syscall_entry
 
 extern kmain
+extern __bss_start
+extern __bss_end
 extern irq_timer_handler
 extern irq_keyboard_handler
 extern syscall_dispatch
@@ -60,6 +62,7 @@ section .text
 %endmacro
 
 _start:
+    cld
     ; CI breadcrumb: kernel entry reached.
     mov dx, 0x3F8
     mov al, 'X'
@@ -67,6 +70,15 @@ _start:
     mov al, 'Y'
     out dx, al
 
+    ; The BIOS disk loader copies only PT_LOAD file bytes; initialize BSS here.
+    mov r12, rdi
+    lea rdi, [rel __bss_start]
+    lea rcx, [rel __bss_end]
+    sub rcx, rdi
+    shr rcx, 3
+    xor eax, eax
+    rep stosq
+    mov rdi, r12
     mov rsp, 0x00200000
     call kmain
 .halt:

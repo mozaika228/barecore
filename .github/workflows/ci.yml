@@ -23,3 +23,6 @@ jobs:
 
       - name: QEMU smoke test
         run: make CROSS=x86_64-linux-gnu- ci-smoke
+
+      - name: QEMU runtime test
+        run: make CROSS=x86_64-linux-gnu- ci-runtime
